@@ -3,37 +3,407 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LLM Monitor</title>
+<title>Lomora - LLM Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
-  :root { --bg:#0f1117; --card:#1a1d27; --accent:#4f8cff; --ok:#34d399; --warn:#f59e0b; --text:#e2e8f0; --muted:#64748b; }
-  * { box-sizing:border-box; margin:0; }
-  body { font-family:'Inter',system-ui,sans-serif; background:var(--bg); color:var(--text); padding:24px; }
-  h1 { font-size:1.3rem; margin-bottom:20px; font-weight:600; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; margin-bottom:24px; }
-  .card { background:var(--card); border-radius:12px; padding:20px; }
-  .card .label { font-size:.75rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
-  .card .value { font-size:1.8rem; font-weight:700; margin-top:6px; }
-  .card .sub   { font-size:.75rem; color:var(--muted); margin-top:4px; }
-  .controls { display:flex; gap:10px; align-items:end; margin-bottom:20px; flex-wrap:wrap; }
-  .controls label { font-size:.8rem; color:var(--muted); display:block; margin-bottom:4px; }
-  .controls input { background:#22263a; border:1px solid #334; border-radius:8px; color:var(--text); padding:8px 12px; font-size:.9rem; }
-  .controls input.model { width:200px; }
-  .controls input.prompt { width:320px; }
-  .controls input.maxtok { width:80px; }
-  button { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:10px 22px; font-size:.9rem; cursor:pointer; font-weight:600; }
-  button:disabled { opacity:.5; cursor:wait; }
-  #chart-wrap { background:var(--card); border-radius:12px; padding:20px; margin-bottom:24px; height:220px; }
-  table { width:100%; border-collapse:collapse; font-size:.85rem; }
-  th { text-align:left; color:var(--muted); font-weight:500; padding:8px 10px; border-bottom:1px solid #334; }
-  td { padding:8px 10px; border-bottom:1px solid #1e2235; }
-  .err { color:#f87171; font-size:.9rem; margin-top:12px; }
-  #status { font-size:.8rem; color:var(--muted); margin-left:auto; }
+  :root {
+    --bg: #0b0e14;
+    --bg-2: #11151f;
+    --card: rgba(22,26,38,0.72);
+    --card-solid: #161a26;
+    --border: rgba(255,255,255,0.06);
+    --accent: #5b8cff;
+    --accent-2: #7c5cff;
+    --ok: #34d399;
+    --warn: #f59e0b;
+    --err: #f87171;
+    --text: #e6ecf5;
+    --muted: #8a93a6;
+    --shadow: 0 10px 30px rgba(0,0,0,0.35);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: radial-gradient(1200px 600px at 10% -10%, rgba(91,140,255,0.18), transparent 60%),
+                radial-gradient(900px 500px at 100% 0%, rgba(124,92,255,0.14), transparent 60%),
+                var(--bg);
+    color: var(--text);
+    padding: 32px 24px 48px;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container { max-width: 1280px; margin: 0 auto; }
+
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; gap: 16px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand .logo { width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); display: grid; place-items: center; font-weight: 700; color: #fff; box-shadow: 0 6px 18px rgba(91,140,255,0.35); }
+  h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.01em; }
+  .subtitle { color: var(--muted); font-size: 0.85rem; margin-top: 2px; }
+  .status-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); font-size: 0.8rem; color: var(--muted); }
+  .status-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 24px; }
+  .card {
+    background: var(--card);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 20px;
+    box-shadow: var(--shadow);
+    transition: transform 0.18s ease, border-color 0.18s ease;
+    position: relative;
+    overflow: hidden;
+  }
+  .card:hover { transform: translateY(-2px); border-color: rgba(91,140,255,0.25); }
+  .card .label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+  .card .value { font-size: 1.9rem; font-weight: 700; margin-top: 8px; letter-spacing: -0.02em; line-height: 1; }
+  .card .sub { font-size: 0.75rem; color: var(--muted); margin-top: 8px; }
+  .card.accent::before { content: ""; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(91,140,255,0.08), transparent 60%); pointer-events: none; }
+
+  .panel {
+    background: var(--card);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+    box-shadow: var(--shadow);
+    margin-bottom: 24px;
+  }
+  .controls { display: flex; gap: 14px; align-items: end; flex-wrap: wrap; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 0.75rem; color: var(--muted); font-weight: 500; }
+  .controls input {
+    background: rgba(10,13,20,0.6);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    padding: 10px 14px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .controls input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,140,255,0.18); }
+  .controls input.model { width: 220px; }
+  .controls input.prompt { width: 340px; }
+  .controls input.maxtok { width: 90px; }
+
+  button {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 22px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    box-shadow: 0 6px 18px rgba(91,140,255,0.3);
+    transition: transform 0.12s, box-shadow 0.12s, opacity 0.12s;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  button:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(91,140,255,0.4); }
+  button:active { transform: translateY(0); }
+  button:disabled { opacity: 0.55; cursor: wait; transform: none; }
+  .spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: none; }
+  button.loading .spinner { display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .err { color: var(--err); font-size: 0.85rem; margin-top: 12px; min-height: 1.2em; }
+  #status { font-size: 0.8rem; color: var(--muted); margin-left: auto; align-self: center; }
+
+  #chart-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; margin-bottom: 24px; height: 260px; box-shadow: var(--shadow); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  thead th { text-align: left; color: var(--muted); font-weight: 600; padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  tbody td { padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  tbody tr { transition: background 0.12s; }
+  tbody tr:hover { background: rgba(91,140,255,0.06); }
+  tbody tr:last-child td { border-bottom: none; }
+  .empty { text-align: center; color: var(--muted); padding: 32px 14px; font-size: 0.85rem; }
+
+  .section-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .section-title .badge { font-size: 0.7rem; color: var(--muted); font-weight: 500; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,0.05); }
+
+  footer { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 32px; }
+
+  @media (max-width: 640px) {
+    body { padding: 20px 14px 32px; }
+    .controls input.model, .controls input.prompt { width: 100%; }
+  }
 </style>
 </head>
 <body>
+<div class="container">
 
-<h1>⚡ LLM Server Monitor</h1>
+<header>
+  <div class="brand">
+    <div class="logo">L</div>
+    <div>
+      <h1>Lomora</h1>
+      <div class="subtitle">Local LLM performance monitor</div>
+    </div>
+  </div>
+  <div class="status-pill"><span class="dot"></span><span id="status">Ready</span></div>
+</header>
 
-<!-- ── Metric Cards ── -->
-<div class="
+<div class="grid">
+  <div class="card accent"><div class="label">CPU</div><div class="value" id="cpu">--</div><div class="sub">utilization %</div></div>
+  <div class="card accent"><div class="label">RAM</div><div class="value" id="ram">--</div><div class="sub" id="ram-sub">-- / -- GB</div></div>
+  <div class="card accent"><div class="label">GPU Util</div><div class="value" id="gpu">--</div><div class="sub">utilization %</div></div>
+  <div class="card accent"><div class="label">GPU Memory</div><div class="value" id="gpumem">--</div><div class="sub" id="gpumem-sub">-- / -- MB</div></div>
+  <div class="card accent"><div class="label">GPU Temp</div><div class="value" id="gputemp">--</div><div class="sub">celsius</div></div>
+  <div class="card accent"><div class="label">Last tok/s</div><div class="value" id="lasttps">--</div><div class="sub">tokens / second</div></div>
+</div>
+
+<div class="panel">
+  <div class="section-title">Run benchmark <span class="badge">POST /api/test</span></div>
+  <div class="controls">
+<div class="field"><label>Provider</label>
+      <select id="provider" onchange="onProviderChange()" style="background:rgba(10,13,20,0.6);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:10px 14px;font-size:.9rem;font-family:inherit;">
+        <option value="lmstudio">LM Studio (1234)</option>
+        <option value="ollama">Ollama (11434)</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+    <div class="field"><label>Base URL</label><input class="model" id="baseUrl" value="http://localhost:1234"></div>
+    <div class="field"><label>Model</label><input class="model" id="model" value="local-model" list="models"></div>
+    <datalist id="models"></datalist>
+    <div class="field"><label>Prompt</label><input class="prompt" id="prompt" value="Count from 1 to 20, one number per line."></div>
+    <div class="field"><label>Max tokens</label><input class="maxtok" id="maxtok" type="number" value="100" min="1" max="2048"></div>
+    <button id="runBtn" onclick="runTest()"><span class="spinner"></span><span class="btn-label">Run Test</span></button>
+  </div>
+  <div class="err" id="err"></div>
+</div>
+
+<div id="chart-wrap"><canvas id="chart"></canvas></div>
+
+<div class="panel">
+  <div class="section-title">History <span class="badge" id="histCount">0 runs</span></div>
+  <table>
+    <thead><tr><th>Time</th><th>Model</th><th>Max tokens</th><th>TTFT (ms)</th><th>Total (s)</th><th>Tokens</th><th>tok/s</th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="7" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr></tbody>
+  </table>
+</div>
+
+<div class="panel" id="stressPanel">
+  <div class="section-title">Stress test <span class="badge">POST /api/stress</span></div>
+  <div class="controls">
+    <div class="field"><label>Concurrency</label><input class="maxtok" id="stressConc" type="number" value="4" min="1" max="32"></div>
+    <div class="field"><label>Requests</label><input class="maxtok" id="stressReqs" type="number" value="20" min="1" max="500"></div>
+    <div class="field"><label>Max tokens</label><input class="maxtok" id="stressMaxtok" type="number" value="64" min="1" max="2048"></div>
+    <button id="stressBtn" onclick="runStress()"><span class="spinner"></span><span class="btn-label">Run Stress Test</span></button>
+  </div>
+  <div class="err" id="stressErr"></div>
+  <div id="stressResults" style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;font-size:.85rem;"></div>
+</div>
+
+<div class="panel" id="profilePanel">
+  <div class="section-title">System profile <span class="badge">linked to benchmark results</span></div>
+  <div class="controls" style="align-items:start;">
+    <div class="field"><label>Profile name</label><input class="model" id="profileName" value="My workstation"></div>
+    <div class="field" style="flex:1;min-width:260px;"><label>Notes</label><input class="prompt" id="profileNotes" value="" placeholder="e.g. RTX 4090, 64GB RAM, i9-13900K"></div>
+    <button onclick="saveProfile()">Save profile</button>
+  </div>
+  <div id="profileDetails" style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;font-size:.85rem;color:var(--muted);"></div>
+</div>
+
+<footer>Lomora - Local LLM Rating Toolbox</footer>
+</div>
+
+<script>
+const chart = new Chart(document.getElementById('chart'), {
+  type: 'line',
+  data: { labels: [], datasets: [{
+    label: 'tok/s', data: [], borderColor: '#5b8cff',
+    backgroundColor: 'rgba(91,140,255,0.12)', tension: 0.35, fill: true,
+    pointRadius: 3, pointBackgroundColor: '#5b8cff', borderWidth: 2
+  }]},
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8a93a6', font: { size: 10 } } },
+      y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8a93a6', font: { size: 10 } } }
+    }
+  }
+});
+
+async function loadHardware(){
+  try {
+    const d = await fetch('/api/hardware').then(r=>r.json());
+    document.getElementById('cpu').textContent = d.cpu_percent ?? '--';
+    document.getElementById('ram').textContent = d.ram_percent ?? '--';
+    document.getElementById('ram-sub').textContent = `${d.ram_used_gb} / ${d.ram_total_gb} GB`;
+    if (d.gpu_util !== undefined) {
+      document.getElementById('gpu').textContent = d.gpu_util;
+      document.getElementById('gpumem').textContent = d.gpu_mem_mb;
+      document.getElementById('gpumem-sub').textContent = `${d.gpu_mem_mb} / ${d.gpu_mem_tot} MB`;
+      document.getElementById('gputemp').textContent = d.gpu_temp_c;
+    } else {
+      document.getElementById('gpu').textContent = 'N/A';
+      document.getElementById('gpumem').textContent = 'N/A';
+      document.getElementById('gpumem-sub').textContent = 'no GPU';
+      document.getElementById('gputemp').textContent = 'N/A';
+    }
+  } catch(e){ console.error(e); }
+}
+
+function addRow(r){
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td>${r.timestamp}</td><td>${r.model}</td><td>${r.max_tokens}</td><td>${r.ttft_ms ?? '-'}</td><td>${r.total_s}</td><td>${r.tokens}</td><td><strong>${r.tok_per_s}</strong></td>`;
+  document.getElementById('tbody').prepend(tr);
+}
+
+function refreshChart(history){
+  chart.data.labels = history.map((_,i)=>i+1);
+  chart.data.datasets[0].data = history.map(h=>h.tok_per_s);
+  chart.update();
+}
+
+async function loadHistory(){
+  try {
+    const h = await fetch('/api/history').then(r=>r.json());
+    const tbody = document.getElementById('tbody');
+    if (!h.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr>'; }
+    else { tbody.innerHTML = ''; h.slice().reverse().forEach(addRow); }
+    refreshChart(h);
+    if (h.length) document.getElementById('lasttps').textContent = h[h.length-1].tok_per_s;
+    document.getElementById('histCount').textContent = `${h.length} run${h.length===1?'':'s'}`;
+  } catch(e){ console.error(e); }
+}
+
+async function loadModels(){
+  try {
+    const base = document.getElementById('baseUrl').value;
+    const m = await fetch('/api/models?base_url=' + encodeURIComponent(base)).then(r=>r.json());
+    if (Array.isArray(m)) {
+      const dl = document.getElementById('models');
+      dl.innerHTML = '';
+      m.forEach(id => { const o=document.createElement('option'); o.value=id; dl.appendChild(o); });
+      if (m.length && (!document.getElementById('model').value || document.getElementById('model').value === 'local-model')) {
+        document.getElementById('model').value = m[0];
+      }
+    }
+  } catch(e){ console.error(e); }
+}
+
+function onProviderChange(){
+  const p = document.getElementById('provider').value;
+  const base = document.getElementById('baseUrl');
+  if (p === 'lmstudio') base.value = 'http://localhost:1234';
+  else if (p === 'ollama') base.value = 'http://localhost:11434';
+  loadModels();
+}
+
+async function loadProfile(){
+  try {
+    const p = await fetch('/api/profile').then(r=>r.json());
+    document.getElementById('profileName').value = p.name || '';
+    document.getElementById('profileNotes').value = p.notes || '';
+    const details = document.getElementById('profileDetails');
+    const rows = [
+      ['Profile', p.name],
+      ['CPU', p.cpu],
+      ['Cores', `${p.cpu_cores_physical}P / ${p.cpu_cores_logical}L`],
+      ['RAM', `${p.ram_total_gb} GB`],
+      ['GPU', p.gpu],
+      ['VRAM', p.gpu_vram_gb ? `${p.gpu_vram_gb} GB` : '-'],
+      ['Driver', p.gpu_driver || '-'],
+      ['OS', p.os],
+    ];
+    details.innerHTML = rows.map(([k,v]) => `<div><strong style="color:var(--text)">${k}</strong><br>${v ?? '-'}</div>`).join('');
+  } catch(e){ console.error(e); }
+}
+
+async function saveProfile(){
+  const name = document.getElementById('profileName').value;
+  const notes = document.getElementById('profileNotes').value;
+  try {
+    await fetch('/api/profile', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, notes})});
+    loadProfile();
+    document.getElementById('status').textContent = 'Profile saved';
+  } catch(e){ console.error(e); }
+}
+
+async function runStress(){
+  const btn = document.getElementById('stressBtn');
+  const err = document.getElementById('stressErr');
+  const res = document.getElementById('stressResults');
+  err.textContent = '';
+  res.innerHTML = '';
+  btn.disabled = true; btn.classList.add('loading');
+  document.getElementById('status').textContent = 'Stress testing...';
+  try {
+    const body = {
+      model: document.getElementById('model').value,
+      prompt: document.getElementById('prompt').value,
+      max_tokens: parseInt(document.getElementById('stressMaxtok').value,10),
+      base_url: document.getElementById('baseUrl').value,
+      concurrency: parseInt(document.getElementById('stressConc').value,10),
+      requests: parseInt(document.getElementById('stressReqs').value,10)
+    };
+    const r = await fetch('/api/stress', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const data = await r.json();
+    if (data.error){ err.textContent = data.error; document.getElementById('status').textContent='Failed'; return; }
+    const rows = [
+      ['Requests', `${data.success}/${data.requests} ok`],
+      ['Errors', data.errors],
+      ['Wall time', `${data.wall_s}s`],
+      ['Avg latency', `${data.avg_latency_s}s`],
+      ['p95 latency', `${data.p95_latency_s}s`],
+      ['Throughput', `${data.req_per_s} req/s`],
+      ['Agg tok/s', data.agg_tok_per_s],
+      ['Total tokens', data.total_tokens],
+    ];
+    res.innerHTML = rows.map(([k,v]) => `<div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:10px 12px;"><div style="color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">${k}</div><div style="font-size:1.1rem;font-weight:700;margin-top:4px;">${v}</div></div>`).join('');
+    await loadHistory();
+    document.getElementById('status').textContent = `Stress done: ${data.req_per_s} req/s`;
+  } catch(e){
+    err.textContent = String(e);
+    document.getElementById('status').textContent = 'Error';
+  } finally {
+    btn.disabled = false; btn.classList.remove('loading');
+  }
+}
+
+async function runTest(){
+  const btn = document.getElementById('runBtn');
+  const err = document.getElementById('err');
+  const status = document.getElementById('status');
+  err.textContent='';
+  btn.disabled=true; btn.classList.add('loading');
+  status.textContent='Running...';
+  try {
+    const body = {
+      model: document.getElementById('model').value,
+      prompt: document.getElementById('prompt').value,
+      max_tokens: parseInt(document.getElementById('maxtok').value,10),
+      base_url: document.getElementById('baseUrl').value
+    };
+    const r = await fetch('/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const data = await r.json();
+    if (data.error){ err.textContent = data.error; status.textContent='Failed'; return; }
+    await loadHistory();
+    document.getElementById('lasttps').textContent = data.tok_per_s;
+    status.textContent = `Done: ${data.tok_per_s} tok/s`;
+  } catch(e){
+    err.textContent = String(e);
+    status.textContent='Error';
+  } finally {
+    btn.disabled=false; btn.classList.remove('loading');
+  }
+}
+
+loadHardware();
+loadHistory();
+loadModels();
+loadProfile();
+setInterval(loadHardware, 3000);
+</script>
+</body>
+</html>

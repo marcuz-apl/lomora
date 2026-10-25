@@ -1,15 +1,11 @@
 # Lomora - a Local LLM Rating Toolbox
 
-A simple web app to monitor the local LLM models performance.
-
-
+A simple web app to monitor local LLM model performance (LM Studio compatible).
 
 ## Requirements
 
-- Node.js
-- npm
-
-
+- Python 3.9+
+- (Optional) NVIDIA GPU with drivers for GPU metrics
 
 ## Getting Started
 
@@ -17,39 +13,29 @@ A simple web app to monitor the local LLM models performance.
 
    ```bash
    git clone https://github.com/marcuz-apl/lomora.git
+   cd lomora
    ```
 
 2. Install dependencies
 
    ```bash
-   npm install
+   pip install -r requirements.txt
    ```
 
-3. Run the app in development mode
+3. (Optional) Start LM Studio and load a model (default endpoint http://localhost:1234). Override with LMSTUDIO_URL.
 
-   ```shell
-   npm run dev
-   ```
-
-4. Open your browser and visit
+4. Run the app
 
    ```bash
-   http://localhost:3000
+   python main.py
    ```
 
+5. Open your browser and visit
 
-
-## Scripts
-
-```shell
-npm run dev
-npm run build
-npm start
-```
-
-
+   ```
+   http://localhost:8501
+   ```
 
 ## License
 
 This project is licensed under the [MIT License](./LICENSE).
-
