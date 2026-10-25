@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+httpx
+psutil
+pynvml        # NVIDIA GPU; skip if AMD/Intel

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LLM Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#0f1117; --card:#1a1d27; --accent:#4f8cff; --ok:#34d399; --warn:#f59e0b; --text:#e2e8f0; --muted:#64748b; }
+  * { box-sizing:border-box; margin:0; }
+  body { font-family:'Inter',system-ui,sans-serif; background:var(--bg); color:var(--text); padding:24px; }
+  h1 { font-size:1.3rem; margin-bottom:20px; font-weight:600; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; margin-bottom:24px; }
+  .card { background:var(--card); border-radius:12px; padding:20px; }
+  .card .label { font-size:.75rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .card .value { font-size:1.8rem; font-weight:700; margin-top:6px; }
+  .card .sub   { font-size:.75rem; color:var(--muted); margin-top:4px; }
+  .controls { display:flex; gap:10px; align-items:end; margin-bottom:20px; flex-wrap:wrap; }
+  .controls label { font-size:.8rem; color:var(--muted); display:block; margin-bottom:4px; }
+  .controls input { background:#22263a; border:1px solid #334; border-radius:8px; color:var(--text); padding:8px 12px; font-size:.9rem; }
+  .controls input.model { width:200px; }
+  .controls input.prompt { width:320px; }
+  .controls input.maxtok { width:80px; }
+  button { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:10px 22px; font-size:.9rem; cursor:pointer; font-weight:600; }
+  button:disabled { opacity:.5; cursor:wait; }
+  #chart-wrap { background:var(--card); border-radius:12px; padding:20px; margin-bottom:24px; height:220px; }
+  table { width:100%; border-collapse:collapse; font-size:.85rem; }
+  th { text-align:left; color:var(--muted); font-weight:500; padding:8px 10px; border-bottom:1px solid #334; }
+  td { padding:8px 10px; border-bottom:1px solid #1e2235; }
+  .err { color:#f87171; font-size:.9rem; margin-top:12px; }
+  #status { font-size:.8rem; color:var(--muted); margin-left:auto; }
+</style>
+</head>
+<body>
+
+<h1>⚡ LLM Server Monitor</h1>
+
+<!-- ── Metric Cards ── -->
+<div class="
