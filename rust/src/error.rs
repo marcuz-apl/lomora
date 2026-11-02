@@ -28,13 +28,24 @@ impl ValidationErrors {
         ]}))
     }
 
-    /// FastAPI's answer to an unparseable body: `json_invalid`, located at the byte offset
-    /// inside `body`. axum hands back a plain-text 400 for exactly this case (it reserves
-    /// 422 for well-formed JSON that does not fit the model), so handlers take
-    /// `Result<Json<_>, JsonRejection>` and route the failure through here instead.
-    pub fn json_invalid(msg: &str) -> ValidationErrors {
+    /// FastAPI's answer to an unparseable body: a `json_invalid` entry whose `loc[1]` is the
+    /// *character offset* of the parse failure and whose `msg` is FastAPI's own decode string.
+    /// axum hands back a plain-text 400 for exactly this case (it reserves 422 for well-formed
+    /// JSON that does not fit the model), so handlers take `Result<Json<_>, JsonRejection>` and
+    /// route the failure through here instead.
+    ///
+    /// `offset` is a parameter rather than a hardcoded `0` to make the call site state which
+    /// position it is reporting. axum's `JsonSyntax`/`JsonData` rejections expose only
+    /// `body_text()`/`status()` (the inner `serde_json::Error` line/column is `pub(crate)`), so
+    /// the call site currently passes `0` and the real offset is not yet reported.
+    ///
+    /// This is a syntax-error envelope only. Getting the true character offset + FastAPI `msg`,
+    /// and splitting a data error (a well-formed body with the wrong field type, which Python
+    /// reports as `int_parsing` at `loc: ["body","max_tokens"]`) apart from a syntax error, are
+    /// all Task 5's responsibility; do not treat this helper as the general validation shape.
+    pub fn json_invalid(msg: &str, offset: usize) -> ValidationErrors {
         ValidationErrors(json!({ "detail": [
-            { "type": "json_invalid", "loc": ["body", 0], "msg": "JSON decode error",
+            { "type": "json_invalid", "loc": ["body", offset], "msg": "JSON decode error",
               "input": {}, "ctx": { "error": msg } }
         ]}))
     }

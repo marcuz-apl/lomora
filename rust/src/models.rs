@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 fn default_model() -> String { "local-model".into() }
 fn default_prompt() -> String { "Count from 1 to 20, one number per line.".into() }
@@ -11,6 +11,3 @@ pub struct TestReq {
     #[serde(default = "default_maxtok_test")] pub max_tokens: i64,
     #[serde(default)]                     pub base_url: Option<String>,
 }
-
-#[derive(Serialize)]
-pub struct EmptyHistory;

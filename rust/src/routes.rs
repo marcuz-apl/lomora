@@ -18,6 +18,9 @@ pub async fn get_history() -> Json<Value> {
 pub async fn run_test_placeholder(body: Result<Json<TestReq>, JsonRejection>) -> Response {
     match body {
         Ok(Json(_req)) => Json(json!({"error": "not implemented"})).into_response(),
-        Err(rejection) => ValidationErrors::json_invalid(&rejection.body_text()).into_response(),
+        // axum's JsonRejection exposes no parse offset (see ValidationErrors::json_invalid), so
+        // the position is reported as 0 for now; Task 5 owns the real offset and the data-error
+        // vs syntax-error split.
+        Err(rejection) => ValidationErrors::json_invalid(&rejection.body_text(), 0).into_response(),
     }
 }
