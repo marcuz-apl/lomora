@@ -799,7 +799,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Run it with `cd rust && cargo run --bin mock-upstream`, which listens on `127.0.0.1:8600`.
+Run it with `cd rust && cargo run --bin mock_upstream`, which listens on `127.0.0.1:8600`.
 
 ```rust
 use axum::{routing::{get, post}, Json, Router};
@@ -1550,7 +1550,7 @@ Expected: scanner tests pass first (they were written before the route), endpoin
 
 - [ ] **Step 9: Diff against Python with the same mock as upstream**
 
-Start the Python app against the shared mock (`cargo run --bin mock-upstream` on `:8600`;
+Start the Python app against the shared mock (`cargo run --bin mock_upstream` on `:8600`;
 `python -m http.server` will not do, it cannot answer `/v1/chat/completions`). Point both apps at it: Python `curl -s localhost:8501/api/test -d '{"base_url":"http://localhost:8600",...}'`, Rust `:8502` with the same body.
 Expected: identical key names, order, and types. Values for `ttft_ms`, `total_s`, `tok_per_s` differ because they are measured, not replayed.
 
@@ -2066,7 +2066,7 @@ Also assert exact equality for the deterministic subset: `/api/models` body, `/a
 
 - [ ] **Step 2: Start the mock as a standalone target and run the parity suite**
 
-The mock binary already exists from Task 3 — start it with `cargo run --bin mock-upstream`.
+The mock binary already exists from Task 3 — start it with `cargo run --bin mock_upstream`.
 Start Python with `python main.py` and Rust with `cd rust && PORT=8502 cargo run`, then `cd rust && cargo test --test parity -- --ignored --nocapture`.
 Note that `.venv` in this repo is an empty scaffold with no pip; the dependency set
 (`fastapi`, `psutil`, `httpx`, `pynvml`) is installed for the **system** `python` on this
