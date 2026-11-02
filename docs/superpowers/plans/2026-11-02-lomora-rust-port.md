@@ -336,10 +336,16 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use crate::config::Config;
-use crate::hw::Sampler;
 
 #[derive(Clone)]
-pub struct AppState { pub cfg: Arc<Config>, pub hw: Sampler }
+pub struct AppState { pub cfg: Arc<Config> }
+
+impl AppState {
+    /// The single construction path. Tasks 2, 3, 4 and 6 each add one field here — to the
+    /// struct, to `new`, and to no other call site, because `main.rs`, `spawn_app`, and
+    /// `fresh_app` all go through this function.
+    pub fn new(cfg: Config) -> AppState { AppState { cfg: Arc::new(cfg) } }
+}
 
 async fn fallback(State(st): State<AppState>, uri: Uri) -> Response<Body> {
     let path = uri.path().to_string();
@@ -360,10 +366,10 @@ pub fn build_router(state: AppState) -> Router {
 }
 ```
 
-In this task `AppState` carries `cfg` and `hw`; Tasks 3, 4, and 6 add `http`, `db`, and
-`gpu` respectively. `Sampler` is created in Task 2, so for Task 1 temporarily give `AppState`
-only `cfg` and add `hw` when Task 2 lands — the two tasks are adjacent commits, and the
-compiler tells you which field is missing.
+`AppState` in this task holds **only** `cfg` — `hw` arrives in Task 2, `http` in Task 3,
+`db` and `sys` in Task 4, `gpu` in Task 6. Do not add a field early to "save a round trip":
+`hw.rs` does not exist yet, so a `Sampler` field here cannot compile. `main.rs` and both test
+spawners call `AppState::new(cfg)`, so a field added in a later task is a one-place change.
 
 `rust/src/lib.rs` declares every module that exists, including `routes` and (from Task 2)
 `hw` and `bench`:
@@ -462,7 +468,7 @@ git commit -m "Add Rust crate scaffold with Axum router, error parity, embedded 
 Docs are ambiguous about whether sysinfo 0.40 returns bytes or KB, and this decides the `ram_gb` math, so measure instead of trusting the doc.
 
 ```bash
-cd rust && cargo add sysinfo@0.40.1 && mkdir -p examples && cat > examples/calib.rs <<'EOF'
+cd rust && mkdir -p examples && cat > examples/calib.rs <<'EOF'
 use sysinfo::System;
 fn main() {
     let mut s = System::new_all();
@@ -750,8 +756,8 @@ git commit -m "Add background hardware sampler and /api/hardware parity route"
 ## Task 3: Shared HTTP client and `GET /api/models`
 
 **Files:**
-- Create: `rust/tests/models_endpoint.rs`
-- Modify: `rust/src/app.rs` (`AppState` gains `http`), `rust/src/routes.rs`, `rust/src/main.rs`, `rust/tests/support/mod.rs`
+- Create: `rust/src/mock.rs`, `rust/src/bin/mock_upstream.rs`, `rust/tests/models_endpoint.rs`
+- Modify: `rust/src/lib.rs` (`pub mod mock;`), `rust/src/app.rs` (`AppState` gains `http`), `rust/src/routes.rs`, `rust/src/main.rs`, `rust/tests/support/mod.rs` (re-export only)
 
 **Interfaces:**
 - Consumes: `Config::lmstudio_url`, `normalize_base`, `AppError`.
@@ -762,9 +768,38 @@ git commit -m "Add background hardware sampler and /api/hardware parity route"
     the error case is a `{"error": ...}` body, not a `Result`
   - mock upstream from `tests/support` used by every later task
 
-- [ ] **Step 1: Write the mock upstream in `tests/support/mod.rs`**
+- [ ] **Step 1: Write the mock upstream as `rust/src/mock.rs`, not inside `tests/`**
 
 It answers the three shapes the app consumes: an OpenAI model list, a non-streaming completion with `usage`, and a streaming completion whose frames are deliberately split mid-line so the SSE scanner is exercised across chunk boundaries.
+
+It lives in the library because Task 8 needs the *same* mock running as a separate process that the Python reference server can call — and neither an `examples/` nor a `src/bin/` target can import code from `tests/`, which is not part of the crate. `rust/tests/support/mod.rs` re-exports it instead of defining it:
+
+```rust
+// rust/tests/support/mod.rs — top of file, above spawn_app
+pub use lomora::mock::{peak_inflight, spawn_limited_mock, spawn_mock, spawn_mock_sparse};
+```
+
+Add `pub mod mock;` to `rust/src/lib.rs`. The functions below are all `pub` in `mock.rs`,
+and `mock.rs` also exposes `pub fn router() -> axum::Router` — the single construction that
+`spawn_mock` binds and that Task 8's standalone binary reuses, so the two can never drift
+into answering differently.
+
+Also create `rust/src/bin/mock_upstream.rs` in this step (cargo auto-discovers `src/bin/*.rs`
+and names the binary after the file, so no manifest entry is needed). Tasks 5 and 8 both diff
+against it, and the Python app can only reach a mock that is a separate process:
+
+```rust
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let port: u16 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(8600);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    println!("mock upstream on http://127.0.0.1:{port}");
+    axum::serve(listener, lomora::mock::router()).await?;
+    Ok(())
+}
+```
+
+Run it with `cd rust && cargo run --bin mock-upstream`, which listens on `127.0.0.1:8600`.
 
 ```rust
 use axum::{routing::{get, post}, Json, Router};
@@ -772,16 +807,22 @@ use axum::response::IntoResponse;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
-pub async fn spawn_mock() -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = Router::new()
+/// Built once and shared by `spawn_mock` and `src/bin/mock_upstream.rs`. Do not duplicate
+/// these route definitions in a second place — the parity run and the tests must exercise
+/// identical upstream behaviour.
+pub fn router() -> Router {
+    Router::new()
         .route("/v1/models", get(|| async { Json(json!({
             "object": "list",
             "data": [{"id": "mock-a", "object": "model"}, {"id": "mock-b", "object": "model"}]
         }))}))
-        .route("/v1/chat/completions", post(handle_completion));
-    let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        .route("/v1/chat/completions", post(handle_completion))
+}
+
+pub async fn spawn_mock() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move { axum::serve(listener, router()).await.unwrap(); });
     (format!("http://{addr}"), handle)
 }
 
@@ -848,7 +889,7 @@ async fn entries_without_a_usable_id_are_dropped() {
 }
 ```
 
-`spawn_mock_sparse` is a second mock route added to `tests/support/mod.rs` in Step 4: it
+`spawn_mock_sparse` is a second mock route added to `src/mock.rs` in this same step: it
 serves `/v1/models` with `{"data":[{"id":"real-one"},{"object":"model"},
 {"id":"","object":"model"},{"id":null,"object":"model"}]}` — one usable id, one missing,
 one empty, one null — so the filter is exercised rather than merely asserted about. The
@@ -1509,7 +1550,8 @@ Expected: scanner tests pass first (they were written before the route), endpoin
 
 - [ ] **Step 9: Diff against Python with the same mock as upstream**
 
-Start the Python app against a second copy of the mock (`python -m http.server` will not do; run the mock as a standalone binary target `rust/examples/mock_upstream.rs` reusing `tests/support` logic, on port 8600). Point both apps at it: Python `curl -s localhost:8501/api/test -d '{"base_url":"http://localhost:8600",...}'`, Rust `:8502` with the same body.
+Start the Python app against the shared mock (`cargo run --bin mock-upstream` on `:8600`;
+`python -m http.server` will not do, it cannot answer `/v1/chat/completions`). Point both apps at it: Python `curl -s localhost:8501/api/test -d '{"base_url":"http://localhost:8600",...}'`, Rust `:8502` with the same body.
 Expected: identical key names, order, and types. Values for `ttft_ms`, `total_s`, `tok_per_s` differ because they are measured, not replayed.
 
 - [ ] **Step 10: Commit**
@@ -2024,7 +2066,11 @@ Also assert exact equality for the deterministic subset: `/api/models` body, `/a
 
 - [ ] **Step 2: Start the mock as a standalone target and run the parity suite**
 
-Create `rust/examples/mock_upstream.rs` from the Step 1 support mock on a fixed `:8600`. Start Python (`python main.py`), Rust (`cd rust && PORT=8502 cargo run`), then `cd rust && cargo test --test parity -- --ignored --nocapture`.
+The mock binary already exists from Task 3 — start it with `cargo run --bin mock-upstream`.
+Start Python with `python main.py` and Rust with `cd rust && PORT=8502 cargo run`, then `cd rust && cargo test --test parity -- --ignored --nocapture`.
+Note that `.venv` in this repo is an empty scaffold with no pip; the dependency set
+(`fastapi`, `psutil`, `httpx`, `pynvml`) is installed for the **system** `python` on this
+machine, so use plain `python main.py` rather than `.venv/Scripts/python.exe`.
 Expected: every endpoint reports MATCH on key/type/order; any DIFFER line is a Task 1-7 defect to fix before continuing, not to document.
 
 - [ ] **Step 3: The one live model load**
@@ -2035,7 +2081,7 @@ If `tokens` is 0 on both, that is upstream behaviour with a missing `usage` bloc
 
 - [ ] **Step 4: Static UI checks**
 
-`curl -sI localhost:8502/static/index.html` and `curl -sI localhost:8502/` — expected 200 with `content-type: text/html`. Confirm `?LOMORA_STATIC=../static` path serves the same bytes, then unset it. Confirm the dashboard renders and every card populates.
+`curl -sI localhost:8502/static/index.html` and `curl -sI localhost:8502/` — expected 200 with `content-type: text/html`. Then relaunch with the environment variable set — `LOMORA_STATIC=../static PORT=8502 cargo run` — and confirm the on-disk page serves byte-identical content to the embedded one; it is a variable on the process, not a query string. Unset it and restart for the remaining checks. Confirm the dashboard renders and every card populates.
 
 - [ ] **Step 5: Lint, build, measure**
 
