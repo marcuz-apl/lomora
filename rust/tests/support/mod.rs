@@ -7,8 +7,6 @@
 // binaries that only call `spawn_app` would otherwise fail to build for wanting a mock.
 #[allow(unused_imports)]
 pub use lomora::mock::{spawn_mock, spawn_mock_sparse};
-use std::net::SocketAddr;
-use tokio::net::TcpListener;
 
 /// Binds port 0, lets the OS pick an ephemeral port, and returns the base URL plus the
 /// server task. Every later task's tests go through here.
@@ -23,9 +21,26 @@ pub async fn spawn_app() -> (String, tokio::task::JoinHandle<()>) {
 /// (the profile error-envelope test) or open a real file twice for a restart (Task 7). Everything
 /// else about the app is identical to `spawn_app`.
 pub async fn spawn_app_on_db(db: lomora::store::Db) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap()).await.unwrap();
+    spawn_app_with(lomora::config::Config::from_env(), db).await
+}
+
+/// `spawn_app` uses `Config` defaults, which point at a dead LM Studio; `fresh_app(mock)` builds
+/// the same app whose `lmstudio_url` IS the mock, so a test that only cares about the benchmark
+/// needs no `base_url` juggling — while the explicit-`base_url` assertions stay anyway, because
+/// they mirror real usage. One construction path shared with `spawn_app`/`spawn_app_on_db`
+/// (and `main.rs` through `AppState::new`), so the copies cannot drift.
+pub async fn fresh_app(mock: &str) -> (String, tokio::task::JoinHandle<()>) {
+    let mut cfg = lomora::config::Config::from_env();
+    cfg.lmstudio_url = mock.to_string();
+    spawn_app_with(cfg, lomora::store::Db::in_memory()).await
+}
+
+async fn spawn_app_with(cfg: lomora::config::Config, db: lomora::store::Db)
+    -> (String, tokio::task::JoinHandle<()>)
+{
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+        .await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let cfg = lomora::config::Config::from_env();
     // NoGpu keeps the endpoint deterministic: the GPU keys are then absent, and hardware
     // presence is covered by the live parity sweep, not by the test suite.
     let gpu = std::sync::Arc::new(lomora::hw::NoGpu);

@@ -1,16 +1,50 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::error::{FieldKind, FieldSpec};
 
 fn default_model() -> String { "local-model".into() }
 fn default_prompt() -> String { "Count from 1 to 20, one number per line.".into() }
 fn default_maxtok_test() -> i64 { 100 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Debug)]
 pub struct TestReq {
     #[serde(default = "default_model")]   pub model: String,
     #[serde(default = "default_prompt")]  pub prompt: String,
     #[serde(default = "default_maxtok_test")] pub max_tokens: i64,
     #[serde(default)]                     pub base_url: Option<String>,
+}
+
+/// Response of `POST /api/test` — the dict literal at main.py:131. Declaration order IS the
+/// wire order (serde_json `preserve_order` keeps struct field order), and it must stay
+/// `timestamp`, `model`, `max_tokens`, `ttft_ms`, `total_s`, `tokens`, `tok_per_s`.
+/// `ttft_ms` is `Option` but NOT skip-serialized: when the probe catches no accepted data
+/// line Python still emits the key with value `null` (`"ttft_ms": round(...) if ttft_ms else
+/// None`), and a probe that raises never produces a `TestOut` at all — the `{"error": ...}`
+/// envelope owns that case.
+#[derive(Serialize)]
+pub struct TestOut {
+    pub timestamp: String, pub model: String, pub max_tokens: i64,
+    pub ttft_ms: Option<f64>, pub total_s: f64, pub tokens: i64, pub tok_per_s: f64,
+}
+
+impl TestReq {
+    /// The field table `ValidationErrors::parse_json_body` type-checks before deserializing;
+    /// order = pydantic's declaration order (main.py:43-47), which is also the order multiple
+    /// `detail` entries come back in, constraints included.
+    ///
+    /// `max_tokens` carries `Field(100, ge=1, le=2048)`. The two bounds are separate pydantic
+    /// rules, each captured live against `:8501`: over the top is `less_than_equal` with
+    /// `ctx {"le": 2048}`, under the bottom is `greater_than_equal` with `ctx {"ge": 1}`; both
+    /// echo the raw offending input. The bounds ride in the spec so they are checked in the same
+    /// pass as the types — pydantic answers ONE 422 carrying every offending field, and a
+    /// separate post-deserialization `validate()` could only report the first one.
+    pub const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::plain("model", FieldKind::Str),
+        FieldSpec::plain("prompt", FieldKind::Str),
+        FieldSpec::ranged("max_tokens", 1, 2048),
+        FieldSpec::plain("base_url", FieldKind::OptStr),
+    ];
 }
 
 /// Wire shape for `GET /api/profile`. Built with `json!` exactly like `hw::Snapshot::to_json`,
@@ -59,9 +93,21 @@ impl ProfileOut {
 #[derive(Deserialize, Default)]
 pub struct ProfileReq { pub name: Option<String>, pub notes: Option<String> }
 
+impl ProfileReq {
+    /// Both fields are `Optional[str]` (main.py:186-187): a non-string, non-null value is a
+    /// pydantic `string_type` error — captured live (`{"name":5}` on `:8501` answers
+    /// `{"type":"string_type","loc":["body","name"],"msg":"Input should be a valid
+    /// string","input":5}`), while `null` stays legal and means "leave unchanged".
+    pub const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::plain("name", FieldKind::OptStr),
+        FieldSpec::plain("notes", FieldKind::OptStr),
+    ];
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ProfileOut;
+    use super::{ProfileOut, TestOut, TestReq};
+    use serde_json::json;
 
     fn profile_with_gpu(gpu: Option<&str>, vram: Option<f64>, driver: Option<&str>,
                         err: Option<&str>) -> ProfileOut {
@@ -108,5 +154,64 @@ mod tests {
         let v = p.to_json();
         assert!(v.get("cpu_cores_physical").is_some());
         assert!(v["cpu_cores_physical"].is_null());
+    }
+
+    // The /api/test result order is load-bearing (main.py:131-139 and the binding constraint);
+    // the derive emits declaration order, so pin the declaration here without a server.
+    #[test]
+    fn test_out_keys_are_pythons_dict_order() {
+        let v = serde_json::to_value(TestOut {
+            timestamp: "09:41:03".into(), model: "m".into(), max_tokens: 100,
+            ttft_ms: Some(41.5), total_s: 1.25, tokens: 20, tok_per_s: 16.0,
+        }).unwrap();
+        assert_eq!(keys(&v), vec!["timestamp", "model", "max_tokens", "ttft_ms",
+                                  "total_s", "tokens", "tok_per_s"]);
+    }
+
+    // A probe that raised never reaches TestOut (the {"error": ...} envelope owns that case),
+    // but a probe that finished without an accepted data line lands as `ttft_ms: null` — the
+    // key stays present, exactly like Python's `"ttft_ms": round(x, 1) if x else None`.
+    #[test]
+    fn absent_ttft_is_a_null_key_not_a_dropped_one() {
+        let v = serde_json::to_value(TestOut {
+            timestamp: "09:41:03".into(), model: "m".into(), max_tokens: 100,
+            ttft_ms: None, total_s: 1.25, tokens: 20, tok_per_s: 16.0,
+        }).unwrap();
+        assert!(v.get("ttft_ms").is_some(), "Python emits the key with value null");
+        assert!(v["ttft_ms"].is_null());
+        assert_eq!(keys(&v).len(), 7);
+    }
+
+    // The Field(ge=1, le=2048) split, shaped exactly like the live bodies captured from
+    // `:8501`: separate rule, message and ctx per bound, raw input echoed — and checked in the
+    // same pass as the types, so one 422 can carry both kinds of entry.
+    #[test]
+    fn max_tokens_range_validation_matches_pydantic() {
+        use crate::error::ValidationErrors;
+        let parse = |body: &str| {
+            ValidationErrors::parse_json_body::<TestReq>(body.as_bytes(), TestReq::FIELDS)
+        };
+        assert!(parse(r#"{"max_tokens":1}"#).is_ok());
+        assert!(parse(r#"{"max_tokens":2048}"#).is_ok());
+        let err = parse(r#"{"max_tokens":5000}"#).unwrap_err();
+        assert_eq!(err.0["detail"][0], json!({"type": "less_than_equal",
+            "loc": ["body", "max_tokens"],
+            "msg": "Input should be less than or equal to 2048", "input": 5000,
+            "ctx": {"le": 2048}}));
+        let err = parse(r#"{"max_tokens":0}"#).unwrap_err();
+        assert_eq!(err.0["detail"][0], json!({"type": "greater_than_equal",
+            "loc": ["body", "max_tokens"],
+            "msg": "Input should be greater than or equal to 1",
+            "input": 0, "ctx": {"ge": 1}}));
+        // Type error on `model` and constraint error on `max_tokens` arrive together, in
+        // declaration order — measured live on `:8501`, and impossible for a validate() that
+        // runs only after the struct parsed.
+        let err = parse(r#"{"model":5,"max_tokens":5000}"#).unwrap_err();
+        assert_eq!(err.0["detail"], json!([
+            {"type": "string_type", "loc": ["body", "model"],
+             "msg": "Input should be a valid string", "input": 5},
+            {"type": "less_than_equal", "loc": ["body", "max_tokens"],
+             "msg": "Input should be less than or equal to 2048", "input": 5000,
+             "ctx": {"le": 2048}}]));
     }
 }

@@ -69,5 +69,7 @@ async fn runtime_failure_is_200_with_only_an_error_key() {
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(keys, vec!["error"],
         "the {{\"error\": ...}} envelope must carry exactly one key, got: {keys:?}");
-    assert_eq!(obj["error"], Value::String("not implemented".into()));
+    // The message is a live connection failure now that Task 5 replaced the placeholder; the
+    // invariant is that it is a non-empty string, not a particular wording.
+    assert!(obj["error"].as_str().is_some_and(|s| !s.is_empty()), "{body}");
 }

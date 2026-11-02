@@ -39,7 +39,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/models", get(crate::routes::list_models))
         .route("/api/profile", get(crate::routes::get_profile).post(crate::routes::set_profile))
         .route("/api/history", get(crate::routes::get_history))
-        .route("/api/test", post(crate::routes::run_test_placeholder))
+        .route("/api/test", post(crate::routes::run_test))
         .fallback(fallback)
         .layer(cors)
         .with_state(state)
