@@ -2,6 +2,10 @@
 name = "lomora"
 version = "0.1.0"
 edition = "2024"
+# Required since src/bin/mock_upstream.rs exists: without it `cargo run` refuses to guess
+# between the `lomora` and `mock_upstream` binaries, and every live-parity step in the plan
+# (Task 3 Step 6, Task 8's smoke run) runs plain `cargo run`.
+default-run = "lomora"
 
 [lib]
 name = "lomora"

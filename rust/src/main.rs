@@ -11,7 +11,12 @@ async fn main() -> anyhow::Result<()> {
         None => std::sync::Arc::new(lomora::hw::NoGpu),
     };
     let hw = lomora::hw::Sampler::spawn(gpu, std::time::Duration::from_millis(500)).await;
-    let state = lomora::app::AppState::new(cfg, hw);
+    // One client for the whole process: Python builds a fresh `httpx.AsyncClient` per request,
+    // which throws away the connection pool every time. The 10 s model-list and streaming
+    // benchmark overrides live at the call sites; this ceiling is the long-run upper bound.
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300))
+        .pool_max_idle_per_host(64).build().unwrap();
+    let state = lomora::app::AppState::new(cfg, hw, http);
     let router = lomora::app::build_router(state);
     let addr = format!("0.0.0.0:{port}");
     println!("Lomora listening on http://{addr}");

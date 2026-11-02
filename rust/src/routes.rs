@@ -1,12 +1,57 @@
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::extract::rejection::JsonRejection;
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::app::AppState;
+use crate::config::resolve_base;
 use crate::error::ValidationErrors;
 use crate::models::TestReq;
+
+/// `base_url: Optional[str] = None` from main.py: absent, empty, or whitespace-only all fall
+/// back to the configured LM Studio URL, so `#[serde(default)]` on an `Option` is the shape.
+#[derive(Deserialize)]
+pub struct ModelQuery {
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+/// Python's `list_models`: one GET `{base}/v1/models` with a 10 s timeout, and *any* failure
+/// answers HTTP 200 with `{"error": ...}` — never a `Result`, because the frontend's
+/// `Array.isArray(m)` check is what separates a model list from a failure. A success answers a
+/// bare array of id strings, dropping entries whose `id` is missing, empty, or not a string,
+/// which is Python's truthiness filter `if m.get("id")`.
+///
+/// The client is `AppState.http`, built once in `main.rs`, not a new client per request the way
+/// `httpx.AsyncClient` is constructed inside the Python handler; the per-request `.timeout(10s)`
+/// still matches Python's `timeout=10`.
+pub async fn list_models(State(st): State<AppState>, Query(q): Query<ModelQuery>) -> Json<Value> {
+    let base = resolve_base(&st.cfg, q.base_url.as_deref());
+    match st.http.get(format!("{base}/v1/models")).timeout(std::time::Duration::from_secs(10))
+        .send().await
+    {
+        Err(e) => Json(json!({ "error": e.to_string() })),
+        Ok(r) => {
+            let status = r.status();
+            if !status.is_success() {
+                return Json(json!({ "error": status.to_string() }));
+            }
+            match r.json::<Value>().await {
+                Err(e) => Json(json!({ "error": e.to_string() })),
+                Ok(body) => {
+                    let ids: Vec<Value> = body.get("data").and_then(|d| d.as_array())
+                        .map(|arr| arr.iter().filter_map(|m| m.get("id").and_then(|i| i.as_str())
+                            .filter(|s| !s.is_empty()).map(|s| Value::String(s.to_string())))
+                            .collect())
+                        .unwrap_or_default();
+                    Json(Value::Array(ids))
+                }
+            }
+        }
+    }
+}
 
 /// Python samples psutil/pynvml inside this handler; `hw::Sampler` owns the counters now, so
 /// the handler just publishes the cached snapshot. `Snapshot::to_json` fixes the key order.

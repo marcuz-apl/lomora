@@ -4,5 +4,6 @@ pub mod bench;
 pub mod config;
 pub mod error;
 pub mod hw;
+pub mod mock;
 pub mod models;
 pub mod routes;
