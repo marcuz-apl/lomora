@@ -256,7 +256,7 @@ async fn every_endpoint_matches_on_keys_types_order_and_deterministic_values() {
         for d in &diffs { report.push_str(&format!("- {d}\n")); }
     }
     report.push('\n');
-    std::fs::write("../docs/parity-report.md", &report).expect("write docs/parity-report.md");
+    std::fs::write("docs/parity-report.md", &report).expect("write docs/parity-report.md");
     println!("{report}");
     assert!(diffs.is_empty(), "parity differences:\n{}", diffs.join("\n"));
 }

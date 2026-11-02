@@ -4,7 +4,7 @@ use axum::response::IntoResponse;
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
-#[folder = "../static"]
+#[folder = "static"]
 pub struct Asset;
 
 /// `StaticFiles(directory=..., html=True)` answers a bare "/" with index.html, so a path

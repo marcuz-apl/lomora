@@ -2,7 +2,7 @@ mod support;
 use support::spawn_app;
 use axum::body::Body;
 
-/// The dashboard is the only client, and it is served embedded (`rust-embed` from `../static`).
+/// The dashboard is the only client, and it is served embedded (`rust-embed` from `static/`).
 /// Python mounts that directory at the site root — `app.mount("/", StaticFiles(..., html=True))`
 /// — so the paths are `/` and `/index.html`, not `/static/index.html` (which is a 404 on both
 /// servers). `rel_path` reproduces the root mount, and both spellings must hand the browser the
@@ -63,7 +63,7 @@ async fn parent_directory_traversal_is_404_not_a_file() {
 /// Task 8 report covers the env-var plumbing on a real process.
 #[tokio::test]
 async fn on_disk_mode_serves_the_same_bytes_as_the_embedded_assets() {
-    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../static");
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static");
     for path in ["/", "/index.html"] {
         let embedded = lomora::assets::serve(Some(path.to_string())).await;
         let on_disk = lomora::assets::serve_dir(dir.clone(), Some(path.to_string())).await;

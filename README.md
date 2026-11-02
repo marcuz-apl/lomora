@@ -2,12 +2,15 @@
 
 A simple web app to monitor local LLM model performance (LM Studio compatible).
 
+This is the Rust port of the original Python/FastAPI application: the same eight HTTP
+endpoints, the same JSON shapes, and the unchanged `static/index.html` dashboard.
+
 ## Requirements
 
-- Rust toolchain (stable; MSVC or GNU toolchain on Windows)
-- (Optional) NVIDIA GPU with drivers for GPU metrics
+- Rust toolchain (stable; tested with 1.97)
+- (Optional) NVIDIA GPU with a driver exposing NVML for GPU metrics
 
-## Getting Started (Rust)
+## Getting Started
 
 1. Clone the repository
 
@@ -16,15 +19,14 @@ A simple web app to monitor local LLM model performance (LM Studio compatible).
    cd lomora
    ```
 
-2. Build and run the server (from the `rust/` crate directory)
+2. Build and run
 
    ```bash
-   cd rust
    cargo run --release
    ```
 
-   For development builds use `cargo run`; the release binary is written to
-   `rust/target/release/lomora(.exe)`.
+   The release executable is written to `target/release/lomora` (`lomora.exe` on Windows).
+   It embeds the dashboard, so it runs on its own.
 
 3. (Optional) Start LM Studio and load a model (default endpoint http://localhost:1234).
 
@@ -34,34 +36,50 @@ A simple web app to monitor local LLM model performance (LM Studio compatible).
    http://localhost:8501
    ```
 
-The web UI (`static/index.html`) is embedded in the binary at build time, so the
-release executable runs on its own. Runs are persisted in a local SQLite database
-(default `lomora.db` in the working directory) and the dashboard history survives
-restarts (the most recent 60 runs are shown).
+Run history is stored in a local SQLite database (`lomora.db` by default). The dashboard
+shows the most recent 60 runs, and both history and the system profile survive restarts.
 
 ### Configuration
 
 All settings come from environment variables:
 
-| Variable       | Default                 | Purpose                                                        |
-| -------------- | ----------------------- | -------------------------------------------------------------- |
-| `PORT`         | `8501`                  | HTTP port the server listens on.                                |
-| `LMSTUDIO_URL` | `http://localhost:1234` | LM Studio server used when a request has no `base_url` override. |
-| `OLLAMA_URL`   | `http://localhost:11434` | Fallback when `LMSTUDIO_URL` is unset.                          |
-| `LOMORA_DB`    | `lomora.db`             | SQLite file for run history.                                    |
-| `LOMORA_STATIC`| *(embedded)*            | Serve the UI from this directory instead of the embedded copy.  |
+| Variable        | Default                  | Purpose                                                          |
+| --------------- | ------------------------ | ---------------------------------------------------------------- |
+| `PORT`          | `8501`                   | HTTP port the server listens on.                                  |
+| `LMSTUDIO_URL`  | `http://localhost:1234`  | LM Studio server used when a request has no `base_url` override.  |
+| `OLLAMA_URL`    | `http://localhost:11434` | Fallback base URL when `LMSTUDIO_URL` is unset.                   |
+| `LOMORA_DB`     | `lomora.db`              | SQLite file for run history and the saved profile.                |
+| `LOMORA_STATIC` | *(embedded)*             | Serve the UI from this directory instead of the embedded copy.    |
 
-GPU metrics need an NVIDIA driver with NVML (`nvidia-smi`); without one the GPU
-fields report zeros and everything else keeps working.
+When a request carries no `base_url`, the base URL is resolved in this order:
+`LMSTUDIO_URL`, then `OLLAMA_URL`, then `http://localhost:1234`.
 
-## Legacy Python version
+GPU metrics need an NVIDIA driver that exposes NVML (`nvidia-smi`). Without one the GPU
+fields report zeros and every other feature keeps working.
 
-The original Python implementation is still present in the repository root for
-reference and is scheduled for removal.
+## Development
 
-- Install dependencies: `pip install -r requirements.txt`
-- Run: `python main.py`
-- Visit: `http://localhost:8501`
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+`tests/parity.rs` is the ignored end-to-end comparison harness that was run against the
+original Python server before its removal; its evidence is in
+[`docs/parity-report.md`](docs/parity-report.md).
+
+## Measured footprint
+
+On the development machine (Windows, release build):
+
+| Metric                       | This Rust server | Original Python server |
+| ---------------------------- | ---------------- | ---------------------- |
+| Release binary               | ~8.6 MiB         | n/a (interpreter)      |
+| Working set after startup    | 38-40 MB         | 82 MB                  |
+| Cold start, first response   | 3.1-3.6 s        | 9.4 s                  |
+
+Startup is dominated by two full `sysinfo` system scans (one for the static profile
+snapshot, one for the hardware sampler).
 
 ## License
 

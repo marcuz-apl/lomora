@@ -1,11 +1,8 @@
-__pycache__/
-*.pyc
-.venv/
 .env
 
 .worktrees/
 
 .superpowers/
+
 target/
-rust/target/
-lomora.db
+*.db
