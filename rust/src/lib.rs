@@ -1,6 +1,8 @@
 pub mod app;
 pub mod assets;
+pub mod bench;
 pub mod config;
 pub mod error;
+pub mod hw;
 pub mod models;
 pub mod routes;

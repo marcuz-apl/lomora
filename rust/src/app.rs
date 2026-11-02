@@ -9,13 +9,15 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::config::Config;
 
 #[derive(Clone)]
-pub struct AppState { pub cfg: Arc<Config> }
+pub struct AppState { pub cfg: Arc<Config>, pub hw: crate::hw::Sampler }
 
 impl AppState {
     /// The single construction path. Tasks 2, 3, 4 and 6 each add one field here — to the
     /// struct, to `new`, and to no other call site, because `main.rs`, `spawn_app`, and
     /// `fresh_app` all go through this function.
-    pub fn new(cfg: Config) -> AppState { AppState { cfg: Arc::new(cfg) } }
+    pub fn new(cfg: Config, hw: crate::hw::Sampler) -> AppState {
+        AppState { cfg: Arc::new(cfg), hw }
+    }
 }
 
 async fn fallback(State(st): State<AppState>, uri: Uri) -> Response<Body> {
@@ -29,6 +31,7 @@ async fn fallback(State(st): State<AppState>, uri: Uri) -> Response<Body> {
 pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
     Router::new()
+        .route("/api/hardware", get(crate::routes::hardware))
         .route("/api/history", get(crate::routes::get_history))
         .route("/api/test", post(crate::routes::run_test_placeholder))
         .fallback(fallback)

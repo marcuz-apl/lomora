@@ -1,10 +1,18 @@
 use axum::Json;
+use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
+use crate::app::AppState;
 use crate::error::ValidationErrors;
 use crate::models::TestReq;
+
+/// Python samples psutil/pynvml inside this handler; `hw::Sampler` owns the counters now, so
+/// the handler just publishes the cached snapshot. `Snapshot::to_json` fixes the key order.
+pub async fn hardware(State(st): State<AppState>) -> Json<Value> {
+    Json(st.hw.snapshot().await.to_json())
+}
 
 /// Placeholder until Task 7 wires this to SQLite. Python returns oldest-first.
 pub async fn get_history() -> Json<Value> {
