@@ -50,6 +50,11 @@ impl Snapshot {
 }
 
 pub trait Gpu: Send + Sync {
+    /// Python's `HAS_GPU`: whether NVML was initialised at startup at all. It separates the
+    /// profile endpoint's two branches — `available()` false answers `gpu: "None detected"`,
+    /// true answers the card's own fields or, if any query fails, `gpu_error`
+    /// (main.py:178-186).
+    fn available(&self) -> bool { false }
     fn sample(&self) -> Option<GpuSnapshot>;
     fn name(&self) -> Option<String>;
     fn vram_gb(&self) -> Option<f64>;
@@ -100,6 +105,10 @@ impl NvmlGpu {
 }
 
 impl Gpu for NvmlGpu {
+    /// `NvmlGpu` only exists after a successful `Nvml::init()` + device lookup, which is
+    /// exactly Python's `HAS_GPU = True` (main.py:18-23).
+    fn available(&self) -> bool { true }
+
     fn sample(&self) -> Option<GpuSnapshot> {
         let dev = self.nvml.device_by_index(self.index).ok()?;
         // nvml-wrapper 0.13 renamed the accessors the plan named: `memory_usage()` is now

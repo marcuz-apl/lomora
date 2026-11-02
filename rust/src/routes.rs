@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use axum::Json;
 use axum::body::Bytes;
@@ -6,12 +7,13 @@ use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
 
 use crate::app::AppState;
-use crate::bench::{SseScanner, round_half_even};
+use crate::bench::{SseScanner, from_samples, round_half_even};
 use crate::config::{Config, resolve_base};
 use crate::error::{AppError, ValidationErrors};
-use crate::models::{ProfileOut, ProfileReq, TestOut, TestReq};
+use crate::models::{ProfileOut, ProfileReq, StressOut, StressReq, TestOut, TestReq};
 use crate::store::RunRow;
 
 /// `base_url: Optional[str] = None` from main.py: absent, empty, or whitespace-only all fall
@@ -71,8 +73,8 @@ pub async fn get_history() -> Json<Value> {
 /// Python's `get_profile` (main.py:160). The mutable part (`name`, `notes`) comes from the
 /// SQLite `profile` row; the immutable part from `ProfileStatic`, captured once at startup —
 /// rebuilding system info per request is the per-call `psutil` cost this port removes
-/// (ruling R4). `ram_total_gb` rides the `Sampler`'s cached snapshot instead.
-/// The `gpu*` fields stay `None` (absent keys) until Task 6 wires the `Gpu` trait.
+/// (ruling R4). `ram_total_gb` rides the `Sampler`'s cached snapshot instead, and the `gpu*`
+/// fields come from the handle the sampler already samples.
 /// `ProfileOut::to_json` fixes the key order to Python's dict order (main.py:163).
 /// A failed read is a runtime failure, so it answers the mandated 200 `{"error": …}` through
 /// `AppError` rather than the factory profile: the old `.unwrap_or(default)` silently turned a
@@ -81,12 +83,27 @@ pub async fn get_profile(State(st): State<AppState>) -> Result<Json<Value>, AppE
     let p = st.db.profile().await?;
     let s = st.hw.snapshot().await;
     let sys = &st.sys;   // the startup-captured machine facts; see the note above
+    // Python's `if HAS_GPU:` block (main.py:178-186) is all-or-nothing: the dict literal is
+    // fully evaluated before `prof.update`, so any failed NVML query emits `gpu_error` alone,
+    // never a partial `gpu`/`gpu_vram_gb`/`gpu_driver` trio. `available()` is that flag, and
+    // the "None detected" string is Python's own (main.py:182).
+    let (gpu, gpu_vram_gb, gpu_driver, gpu_error) = if !st.gpu.available() {
+        (Some("None detected".to_string()), None, None, None)
+    } else {
+        match (st.gpu.name(), st.gpu.vram_gb(), st.gpu.driver()) {
+            (Some(name), Some(vram), Some(driver)) => (Some(name), Some(vram), Some(driver), None),
+            // The trait reports a missing field, not the NVML error text, so the wording is
+            // generic here (Python interpolates `str(e)`); spec deviation, values still parity.
+            _ => (None, None, None,
+                  Some(st.gpu.error().unwrap_or_else(|| "NVML query failed".into()))),
+        }
+    };
     let out = ProfileOut {
         name: p.name, notes: p.notes, cpu: sys.cpu.clone(),
         cpu_cores_physical: sys.cores_physical,
         cpu_cores_logical: sys.cores_logical,
-        ram_total_gb: s.ram_total_gb, os: sys.os.clone(), gpu: None, gpu_vram_gb: None,
-        gpu_driver: None, gpu_error: None,
+        ram_total_gb: s.ram_total_gb, os: sys.os.clone(),
+        gpu, gpu_vram_gb, gpu_driver, gpu_error,
     };
     Ok(Json(out.to_json()))
 }
@@ -130,6 +147,98 @@ pub async fn run_test(State(st): State<AppState>, body: Bytes) -> Response {
         }
         Err(e) => e.into_response(),
     }
+}
+
+/// Python's `stress_test` (main.py:197). The body goes through the shared 422 pass first
+/// (`concurrency` 1..=32 and `requests` 1..=500 are bounds like `max_tokens`); then `requests`
+/// tasks run behind a semaphore of `concurrency` permits, each timing one non-streaming
+/// completion. A failed call never becomes an HTTP error — it lands in `errors`/`error_samples`
+/// and the endpoint still answers 200 with the aggregate, because Python has no error path here
+/// at all. The history row is written even when every call failed, also like Python, which
+/// appends it after the gather unconditionally; a lost write is the one case Python cannot have
+/// and this port reports through `AppError` rather than swallowing (ruling R11).
+pub async fn stress_test(State(st): State<AppState>, body: Bytes) -> Response {
+    let req = match ValidationErrors::parse_json_body::<StressReq>(&body, StressReq::FIELDS) {
+        Ok(req) => req,
+        Err(v) => return v.into_response(),
+    };
+    let base = resolve_base(&st.cfg, req.base_url.as_deref());
+    let sem = Arc::new(Semaphore::new(req.concurrency as usize));
+    let t0 = Instant::now();
+    let mut handles = Vec::with_capacity(req.requests as usize);
+    for _ in 0..req.requests {
+        let (sem, http, base, req) = (sem.clone(), st.http.clone(), base.clone(), req.clone());
+        handles.push(tokio::spawn(async move {
+            // The permit is held until this block ends, so at most `concurrency` tasks are in
+            // flight at once — Python's `async with sem`.
+            let _permit = match sem.acquire().await {
+                Ok(p) => p,
+                Err(_) => return Err("semaphore closed".to_string()),
+            };
+            let t = Instant::now();
+            let payload = json!({ "model": req.model,
+                "messages": [{"role": "user", "content": req.prompt}],
+                "max_tokens": req.max_tokens });
+            let r = match http.post(format!("{base}/v1/chat/completions"))
+                .timeout(Duration::from_secs(300)).json(&payload).send().await
+            {
+                Ok(r) => r,
+                Err(e) => return Err(e.to_string()),
+            };
+            // `Response::bytes` consumes the response, so read the status first. The body is
+            // read before the elapsed time is taken and parsed after: httpx's `post()` returns
+            // only once the body is read, and Python timestamps before `r.json()`.
+            let code = r.status().as_u16();
+            let bytes = match r.bytes().await {
+                Ok(b) => b,
+                Err(e) => return Err(e.to_string()),
+            };
+            let elapsed = t.elapsed().as_secs_f64();
+            if code >= 400 {
+                // Python's exact wording: the bare number, no reason phrase and no body.
+                return Err(format!("HTTP {code}"));
+            }
+            match serde_json::from_slice::<Value>(&bytes) {
+                Err(e) => Err(e.to_string()),
+                Ok(body) => {
+                    let tok = body.get("usage").and_then(|u| u.get("completion_tokens"))
+                        .and_then(|c| c.as_i64()).unwrap_or(0);
+                    Ok((elapsed, tok))
+                }
+            }
+        }));
+    }
+    let (mut latencies, mut tokens_list, mut errors) =
+        (Vec::new(), Vec::new(), Vec::<String>::new());
+    for h in handles {
+        match h.await {
+            Ok(Ok((el, tk))) => { latencies.push(el); tokens_list.push(tk); }
+            Ok(Err(msg)) => errors.push(msg),
+            Err(e) => errors.push(format!("task join: {e}")),
+        }
+    }
+    let wall = t0.elapsed().as_secs_f64();
+    let agg = from_samples(&latencies, &tokens_list, &errors, latencies.len(), wall);
+
+    let out = StressOut {
+        model: req.model.clone(), base_url: base.clone(),
+        concurrency: req.concurrency, requests: req.requests,
+        success: agg.success, errors: agg.errors, error_samples: agg.error_samples,
+        wall_s: agg.wall_s, avg_latency_s: agg.avg_latency_s, p95_latency_s: agg.p95_latency_s,
+        total_tokens: agg.total_tokens, agg_tok_per_s: agg.agg_tok_per_s, req_per_s: agg.req_per_s,
+    };
+    // main.py:259-267's synthetic history entry: the model suffixed with the concurrency, no
+    // TTFT, `total_s` = wall, `tok_per_s` = the aggregate throughput.
+    let row = RunRow {
+        kind: "stress".into(),
+        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+        model: format!("{} (stress x{})", req.model, req.concurrency),
+        max_tokens: req.max_tokens, ttft_ms: None, total_s: out.wall_s,
+        tokens: out.total_tokens, tok_per_s: out.agg_tok_per_s,
+        concurrency: Some(req.concurrency), base_url: Some(base),
+    };
+    if let Err(e) = st.db.insert_run(&row).await { return AppError::from(e).into_response(); }
+    Json(out).into_response()
 }
 
 /// The whole probe against `base`, no Axum types: the same two upstream calls as Python —

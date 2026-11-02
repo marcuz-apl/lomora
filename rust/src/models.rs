@@ -6,6 +6,9 @@ use crate::error::{FieldKind, FieldSpec};
 fn default_model() -> String { "local-model".into() }
 fn default_prompt() -> String { "Count from 1 to 20, one number per line.".into() }
 fn default_maxtok_test() -> i64 { 100 }
+fn default_maxtok_stress() -> i64 { 64 }
+fn default_concurrency() -> i64 { 4 }
+fn default_requests() -> i64 { 20 }
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct TestReq {
@@ -45,6 +48,45 @@ impl TestReq {
         FieldSpec::ranged("max_tokens", 1, 2048),
         FieldSpec::plain("base_url", FieldKind::OptStr),
     ];
+}
+
+/// Python's `StressReq` (main.py:55-61): the same four fields as `TestReq`, with different
+/// `max_tokens` default and two bounds of its own. `Clone` because every fan-out task owns a
+/// copy, and `Debug` so a rejected body can be printed by a test.
+#[derive(Deserialize, Clone, Debug)]
+pub struct StressReq {
+    #[serde(default = "default_model")]      pub model: String,
+    #[serde(default = "default_prompt")]     pub prompt: String,
+    #[serde(default = "default_maxtok_stress")] pub max_tokens: i64,
+    #[serde(default)]                        pub base_url: Option<String>,
+    #[serde(default = "default_concurrency")] pub concurrency: i64,
+    #[serde(default = "default_requests")]    pub requests: i64,
+}
+
+impl StressReq {
+    /// Declaration order = pydantic's (main.py:55-61) = the order multiple `detail` entries
+    /// come back in. Three fields carry inclusive bounds; all three are checked in the same
+    /// pass as the types (see `FieldSpec`), so a 422 can carry every offending field at once.
+    pub const FIELDS: &'static [FieldSpec] = &[
+        FieldSpec::plain("model", FieldKind::Str),
+        FieldSpec::plain("prompt", FieldKind::Str),
+        FieldSpec::ranged("max_tokens", 1, 2048),
+        FieldSpec::plain("base_url", FieldKind::OptStr),
+        FieldSpec::ranged("concurrency", 1, 32),
+        FieldSpec::ranged("requests", 1, 500),
+    ];
+}
+
+/// Response of `POST /api/stress` — the dict literal at main.py:243-255. Declaration order IS
+/// the wire order. `success` counts completed calls, `errors` the rest; the samples are capped
+/// at five by `bench::from_samples`; the latency keys are `None` (serialized `null`) when not
+/// one request succeeded.
+#[derive(Serialize)]
+pub struct StressOut {
+    pub model: String, pub base_url: String, pub concurrency: i64, pub requests: i64,
+    pub success: usize, pub errors: usize, pub error_samples: Vec<String>,
+    pub wall_s: f64, pub avg_latency_s: Option<f64>, pub p95_latency_s: Option<f64>,
+    pub total_tokens: i64, pub agg_tok_per_s: f64, pub req_per_s: f64,
 }
 
 /// Wire shape for `GET /api/profile`. Built with `json!` exactly like `hw::Snapshot::to_json`,

@@ -10,7 +10,9 @@ async fn main() -> anyhow::Result<()> {
         Some(g) => std::sync::Arc::new(g),
         None => std::sync::Arc::new(lomora::hw::NoGpu),
     };
-    let hw = lomora::hw::Sampler::spawn(gpu, std::time::Duration::from_millis(500)).await;
+    // Same handle for the sampler and `GET /api/profile` (Task 6): one NVML context per process,
+    // like Python's single `_GPU` handle.
+    let hw = lomora::hw::Sampler::spawn(gpu.clone(), std::time::Duration::from_millis(500)).await;
     // One client for the whole process: Python builds a fresh `httpx.AsyncClient` per request,
     // which throws away the connection pool every time. The 10 s model-list and streaming
     // benchmark overrides live at the call sites; this ceiling is the long-run upper bound.
@@ -23,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
     // Profile facts (CPU brand, core counts, OS string) are read once here, never per
     // request — ruling R4. `db` and `sys` are Task 4's additions to AppState.
     let sys = lomora::hw::read_profile_static();
-    let state = lomora::app::AppState::new(cfg, hw, http, db, sys);
+    let state = lomora::app::AppState::new(cfg, hw, http, db, sys, gpu);
     let router = lomora::app::build_router(state);
     let addr = format!("0.0.0.0:{port}");
     println!("Lomora listening on http://{addr}");

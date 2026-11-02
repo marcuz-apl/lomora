@@ -10,15 +10,16 @@ async fn default_profile_name_is_my_workstation() {
     assert_eq!(v["notes"], "");
     let obj = v.as_object().expect("profile must be a JSON object");
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-    // The whole list, not `starts_with`: an exact match pins the order *and* the count, so a
-    // regression that emits `"gpu": null` (forbidden — keys Python omits stay omitted) can no
-    // longer pass unchanged. Same shape as `hw.rs`'s no-gpu test.
+    // Tests build the app with `NoGpu`, so this is Python's no-NVML branch (main.py:181-182):
+    // the seven base keys, then exactly one GPU key — the string, never a null trio. The whole
+    // list pins order and count, so a regression that emits `"gpu_vram_gb": null` fails.
     assert_eq!(keys, vec!["name", "notes", "cpu", "cpu_cores_physical", "cpu_cores_logical",
-                          "ram_total_gb", "os"],
-               "the seven keys Python emits before the GPU block, in dict order");
-    assert_eq!(obj.len(), 7, "nothing may be appended to the profile until Task 6 fills the GPU");
-    for k in ["gpu", "gpu_vram_gb", "gpu_driver", "gpu_error"] {
-        assert!(obj.get(k).is_none(), "{k} must be absent until Task 6 wires the Gpu trait");
+                          "ram_total_gb", "os", "gpu"],
+               "base keys in dict order, then Python's `gpu: \"None detected\"`");
+    assert_eq!(obj.len(), 8);
+    assert_eq!(obj["gpu"], "None detected");
+    for k in ["gpu_vram_gb", "gpu_driver", "gpu_error"] {
+        assert!(obj.get(k).is_none(), "{k} belongs to the NVML branch and must stay absent");
     }
     // `cpu_cores_logical` is `available_parallelism()` (hw.rs:156), which this process can also
     // ask for, so it is pinned to that rather than to this machine's 48. The brief's machine-truth

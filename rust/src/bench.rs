@@ -35,6 +35,37 @@ impl SseScanner {
     pub fn finished(&self) -> bool { self.fired }
 }
 
+/// The numbers `POST /api/stress` reports, built from the finished fan-out. Kept free of Axum
+/// and HTTP so every rounding rule from main.py:236-252 is pinned by unit tests.
+#[derive(Clone, Debug)]
+pub struct StressAggregate {
+    pub success: usize, pub errors: usize, pub error_samples: Vec<String>,
+    pub wall_s: f64, pub avg_latency_s: Option<f64>, pub p95_latency_s: Option<f64>,
+    pub total_tokens: i64, pub agg_tok_per_s: f64, pub req_per_s: f64,
+}
+
+/// Python's aggregate block: `sum(tokens_list)`, `round(sum/len, 3)` for the average,
+/// `pct(0.95)` for p95, `round(total/wall, 1)`, `round(success/wall, 2)`, and the first five
+/// error messages. An empty latency list yields `None` (Python's `None`), never 0.0.
+pub fn from_samples(latencies: &[f64], tokens: &[i64], errors: &[String],
+                    success: usize, wall: f64) -> StressAggregate {
+    let total_tokens: i64 = tokens.iter().sum();
+    let mut lat = latencies.to_vec();
+    let avg = if lat.is_empty() {
+        None
+    } else {
+        Some(round_half_even(lat.iter().sum::<f64>() / lat.len() as f64, 3))
+    };
+    let p95 = percentile_at(&mut lat, 0.95).map(|v| round_half_even(v, 3));
+    let agg = if wall > 0.0 { round_half_even(total_tokens as f64 / wall, 1) } else { 0.0 };
+    let rps = if wall > 0.0 { round_half_even(success as f64 / wall, 2) } else { 0.0 };
+    StressAggregate {
+        success, errors: errors.len(), error_samples: errors.iter().take(5).cloned().collect(),
+        wall_s: round_half_even(wall, 2), avg_latency_s: avg, p95_latency_s: p95,
+        total_tokens, agg_tok_per_s: agg, req_per_s: rps,
+    }
+}
+
 /// Python: s = sorted(l); idx = min(len-1, int(round(p*(len-1)))); returns None if empty.
 /// The inner round is half-to-even, so this replicates the index rule rather than
 /// delegating to a percentile crate. Spec 5.1.
@@ -149,6 +180,72 @@ mod sse_tests {
         let mut s = SseScanner::default();
         assert!(!s.push(b"data: x\r"));
         assert!(s.push(b"\n\r\n"));
+    }
+}
+
+#[cfg(test)]
+mod agg_tests {
+    use super::from_samples;
+
+    #[test]
+    fn empty_latencies_yield_none_not_zero() {
+        let a = from_samples(&[], &[], &["x".into()], 0, 1.5);
+        assert!(a.avg_latency_s.is_none() && a.p95_latency_s.is_none());
+        assert_eq!(a.agg_tok_per_s, 0.0);
+        assert_eq!(a.req_per_s, 0.0);
+        assert_eq!(a.errors, 1);
+        assert_eq!(a.error_samples, ["x"]);
+    }
+
+    #[test]
+    fn single_sample_is_its_own_average_and_p95() {
+        let a = from_samples(&[0.4], &[7], &[], 1, 0.8);
+        assert_eq!(a.avg_latency_s, Some(0.4));
+        assert_eq!(a.p95_latency_s, Some(0.4));
+        assert_eq!(a.total_tokens, 7);
+        // 7 / 0.8 = 8.75 -> round(x, 1) is half-to-even -> 8.8; 1 / 0.8 = 1.25 at 2 digits.
+        assert_eq!(a.agg_tok_per_s, 8.8);
+        assert_eq!(a.req_per_s, 1.25);
+    }
+
+    #[test]
+    fn p95_index_matches_the_python_rule_on_a_small_set() {
+        // len 4: idx = min(3, round_ties_even(0.95*3 = 2.85...)) -> sorted[3].
+        let lat = [0.1, 0.2, 0.3, 0.9];
+        let a = from_samples(&lat, &[1, 1, 1, 1], &[], 4, 1.0);
+        assert_eq!(a.p95_latency_s, Some(0.9));
+        // 1.5000000000000002 / 4 = 0.37500000000000006, rounded (not truncated) at 3 digits.
+        assert_eq!(a.avg_latency_s, Some(0.375));
+    }
+
+    #[test]
+    fn error_samples_are_capped_at_five() {
+        let errs: Vec<String> = (0..9).map(|i| format!("HTTP {i}")).collect();
+        let a = from_samples(&[], &[], &errs, 0, 1.0);
+        assert_eq!(a.errors, 9);
+        assert_eq!(a.error_samples.len(), 5);
+        assert_eq!(a.error_samples[0], "HTTP 0");
+    }
+
+    #[test]
+    fn zero_wall_does_not_divide_by_zero() {
+        let a = from_samples(&[0.1], &[10], &[], 1, 0.0);
+        assert_eq!(a.agg_tok_per_s, 0.0);
+        assert_eq!(a.req_per_s, 0.0);
+    }
+
+    // Python sums `tokens_list` and divides by the wall clock it measured around the gather;
+    // the aggregate reports exactly the numbers it was given, rounding wall (2), avg/p95 (3),
+    // throughput (1) and request rate (2) as main.py does.
+    #[test]
+    fn rounding_matches_the_python_rounds_per_field() {
+        let a = from_samples(&[1.0, 2.0, 3.0], &[5, 5, 5], &[], 3, 2.345);
+        assert_eq!(a.total_tokens, 15);
+        assert_eq!(a.avg_latency_s, Some(2.0));
+        assert_eq!(a.p95_latency_s, Some(3.0));
+        assert_eq!(a.wall_s, 2.35);
+        assert_eq!(a.agg_tok_per_s, 6.4); // 15 / 2.345 = 6.39... -> 6.4
+        assert_eq!(a.req_per_s, 1.28);    // 3 / 2.345 = 1.279... -> 1.28
     }
 }
 
