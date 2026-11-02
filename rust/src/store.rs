@@ -22,6 +22,24 @@ pub struct RunRow {
 #[derive(Debug, Clone)]
 pub struct Profile { pub name: String, pub notes: String }
 
+impl RunRow {
+    /// A history entry carries exactly Python's seven keys, in dict insertion order (main.py's
+    /// `history.append({...})`): `kind`, `concurrency` and `base_url` are internal columns and
+    /// never reach the wire. A `None` `ttft_ms` stays a present null key — stress rows answer
+    /// `"ttft_ms": null`, not a missing field.
+    pub fn to_history_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "timestamp": self.timestamp,
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "ttft_ms": self.ttft_ms,
+            "total_s": self.total_s,
+            "tokens": self.tokens,
+            "tok_per_s": self.tok_per_s,
+        })
+    }
+}
+
 impl Profile {
     /// The factory default: the same strings the `profile` table declares as column defaults
     /// and `SCHEMA` seeds. Keep the three in sync — Python's `system_profile` starts here too.

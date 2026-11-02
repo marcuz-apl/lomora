@@ -65,9 +65,13 @@ pub async fn hardware(State(st): State<AppState>) -> Json<Value> {
     Json(st.hw.snapshot().await.to_json())
 }
 
-/// Placeholder until Task 7 wires this to SQLite. Python returns oldest-first.
-pub async fn get_history() -> Json<Value> {
-    Json(json!([]))
+/// Python's `deque(maxlen=60)` handed back as `list(history)`: oldest-first, at most sixty
+/// entries. A failed read is a runtime failure, so it answers the mandated 200 `{"error": …}`
+/// through `AppError` instead of `unwrap_or_default()` — an empty list is a legitimate answer
+/// ("no runs yet"), and it must not be indistinguishable from "the database is unavailable".
+pub async fn get_history(State(st): State<AppState>) -> Result<Json<Value>, AppError> {
+    let rows = st.db.recent_runs(60).await?;
+    Ok(Json(Value::Array(rows.iter().map(|r| r.to_history_json()).collect())))
 }
 
 /// Python's `get_profile` (main.py:160). The mutable part (`name`, `notes`) comes from the

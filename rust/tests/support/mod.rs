@@ -34,6 +34,19 @@ pub async fn fresh_app(mock: &str) -> (String, tokio::task::JoinHandle<()>) {
     spawn_app_with(cfg, lomora::store::Db::in_memory()).await
 }
 
+/// `fresh_app` over a real file instead of `Db::in_memory()`, so the restart test can build a
+/// second app over the same path after the first one has exited. The path is passed explicitly
+/// rather than through `LOMORA_DB`: `Config` is read once per app, and an env var written by one
+/// test would leak into every other test in this binary (`set_var` is unsafe in edition 2024
+/// precisely because of that cross-thread hazard).
+pub async fn fresh_app_on_db(mock: &str, path: &std::path::Path)
+    -> (String, tokio::task::JoinHandle<()>)
+{
+    let mut cfg = lomora::config::Config::from_env();
+    cfg.lmstudio_url = mock.to_string();
+    spawn_app_with(cfg, lomora::store::Db::open(path).expect("test database")).await
+}
+
 async fn spawn_app_with(cfg: lomora::config::Config, db: lomora::store::Db)
     -> (String, tokio::task::JoinHandle<()>)
 {
