@@ -16,7 +16,14 @@ async fn main() -> anyhow::Result<()> {
     // benchmark overrides live at the call sites; this ceiling is the long-run upper bound.
     let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300))
         .pool_max_idle_per_host(64).build().unwrap();
-    let state = lomora::app::AppState::new(cfg, hw, http);
+    // SQLite is the second real change of behavior from Python: the profile row survives a
+    // restart, where Python's in-memory `system_profile` dict reset to defaults.
+    // `Db::open` must read `cfg.db_path` before `cfg` moves into `AppState::new`.
+    let db = lomora::store::Db::open(&cfg.db_path)?;
+    // Profile facts (CPU brand, core counts, OS string) are read once here, never per
+    // request — ruling R4. `db` and `sys` are Task 4's additions to AppState.
+    let sys = lomora::hw::read_profile_static();
+    let state = lomora::app::AppState::new(cfg, hw, http, db, sys);
     let router = lomora::app::build_router(state);
     let addr = format!("0.0.0.0:{port}");
     println!("Lomora listening on http://{addr}");

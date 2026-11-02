@@ -32,6 +32,8 @@ serde_json = { version = "1.0.154", features = ["preserve_order"] }
 futures-util = "0.3.34"
 mime_guess = "2.0.5"
 anyhow = "1"
+# Needed for the local "HH:MM:SS" timestamp format in later tasks and RFC 3339 here.
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["full"] }

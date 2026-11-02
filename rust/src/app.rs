@@ -7,16 +7,20 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use crate::config::Config;
+use crate::store::Db;
 
 #[derive(Clone)]
-pub struct AppState { pub cfg: Arc<Config>, pub hw: crate::hw::Sampler, pub http: reqwest::Client }
+pub struct AppState { pub cfg: Arc<Config>, pub hw: crate::hw::Sampler, pub http: reqwest::Client,
+                      pub db: Db, pub sys: crate::hw::ProfileStatic }
 
 impl AppState {
     /// The single construction path. Tasks 2, 3, 4 and 6 each add one field here — to the
     /// struct, to `new`, and to no other call site, because `main.rs`, `spawn_app`, and
-    /// `fresh_app` all go through this function.
-    pub fn new(cfg: Config, hw: crate::hw::Sampler, http: reqwest::Client) -> AppState {
-        AppState { cfg: Arc::new(cfg), hw, http }
+    /// `fresh_app` all go through this function. Task 4 adds `db` (the SQLite store) and
+    /// `sys` (the profile facts captured once at startup, ruling R4).
+    pub fn new(cfg: Config, hw: crate::hw::Sampler, http: reqwest::Client,
+               db: Db, sys: crate::hw::ProfileStatic) -> AppState {
+        AppState { cfg: Arc::new(cfg), hw, http, db, sys }
     }
 }
 
@@ -33,6 +37,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/hardware", get(crate::routes::hardware))
         .route("/api/models", get(crate::routes::list_models))
+        .route("/api/profile", get(crate::routes::get_profile).post(crate::routes::set_profile))
         .route("/api/history", get(crate::routes::get_history))
         .route("/api/test", post(crate::routes::run_test_placeholder))
         .fallback(fallback)

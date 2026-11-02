@@ -140,6 +140,41 @@ impl Gpu for NvmlGpu {
 #[derive(Clone)]
 pub struct Sampler(Arc<RwLock<Snapshot>>);
 
+/// Immutable machine facts for `GET /api/profile`, captured once at startup (ruling R4).
+/// Python rebuilds these with `platform`/`psutil` on every poll of the profile endpoint —
+/// a per-request cost the port treats as a defect, not a behavior: parity is on values, not
+/// on when they are measured. `ram_total_gb` is deliberately not here: it already lives in
+/// the `Sampler`'s cached snapshot, which refreshes on its own cadence.
+#[derive(Clone, Debug)]
+pub struct ProfileStatic { pub cpu: String, pub cores_physical: Option<usize>,
+                           pub cores_logical: usize, pub os: String }
+
+/// Read the startup-time profile facts. `routes.rs` must never call this per request — nor
+/// build a `System::new_all()` in a handler, whose `refresh_all()` walks the process table
+/// and is the same class of mistake as the blocking `psutil` call this port exists to remove.
+pub fn read_profile_static() -> ProfileStatic {
+    let cores_logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    // Python emits `f"{platform.system()} {platform.release()}"`; shape match only,
+    // spec deviation 3.
+    let os = format!("{} {}", std::env::consts::OS,
+                      sysinfo::System::os_version().unwrap_or_default())
+        .trim().to_string();
+    // sysinfo 0.40.1: `new_all()`, `physical_core_count()` and `os_version()` all return
+    // `Result<_, sysinfo::Error>` (the brief's `Option<usize>` direct-bind and bare
+    // `let mut sys = new_all()` forms do not compile against this version). A failed
+    // `new_all()` means there are no CPU strings to read, so fall back the way Python's
+    // `platform.processor() or "Unknown CPU"` would.
+    let Ok(mut sys) = sysinfo::System::new_all() else {
+        return ProfileStatic { cpu: "Unknown CPU".to_string(), cores_physical: None,
+                               cores_logical, os };
+    };
+    sys.refresh_all();
+    let cpu = sys.cpus().first().map(|c| c.brand().trim().to_string())
+        .filter(|b| !b.is_empty()).unwrap_or_else(|| "Unknown CPU".to_string());
+    let cores_physical: Option<usize> = sysinfo::System::physical_core_count().ok();
+    ProfileStatic { cpu, cores_physical, cores_logical, os }
+}
+
 /// sysinfo 0.40 reports memory in bytes (measured: total_memory()=240_148_307_968 on this
 /// machine, which divided by 1024^3 is 223.66 — exactly Python's `ram_total_gb`).
 const BYTES_PER_GIB: f64 = 1_073_741_824.0;

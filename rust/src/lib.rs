@@ -7,3 +7,4 @@ pub mod hw;
 pub mod mock;
 pub mod models;
 pub mod routes;
+pub mod store;

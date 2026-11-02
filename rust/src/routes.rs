@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::app::AppState;
 use crate::config::resolve_base;
 use crate::error::ValidationErrors;
-use crate::models::TestReq;
+use crate::models::{ProfileOut, ProfileReq, TestReq};
 
 /// `base_url: Optional[str] = None` from main.py: absent, empty, or whitespace-only all fall
 /// back to the configured LM Studio URL, so `#[serde(default)]` on an `Option` is the shape.
@@ -62,6 +62,46 @@ pub async fn hardware(State(st): State<AppState>) -> Json<Value> {
 /// Placeholder until Task 7 wires this to SQLite. Python returns oldest-first.
 pub async fn get_history() -> Json<Value> {
     Json(json!([]))
+}
+
+/// Python's `get_profile` (main.py:160). The mutable part (`name`, `notes`) comes from the
+/// SQLite `profile` row; the immutable part from `ProfileStatic`, captured once at startup —
+/// rebuilding system info per request is the per-call `psutil` cost this port removes
+/// (ruling R4). `ram_total_gb` rides the `Sampler`'s cached snapshot instead.
+/// The `gpu*` fields stay `None` (absent keys) until Task 6 wires the `Gpu` trait.
+/// `ProfileOut`'s declaration order is Python's dict insertion order (main.py:163).
+pub async fn get_profile(State(st): State<AppState>) -> Json<Value> {
+    let p = st.db.profile().await;
+    let s = st.hw.snapshot().await;
+    let st2 = &st.sys;   // captured once at startup; see the note above
+    let out = ProfileOut {
+        name: p.name, notes: p.notes, cpu: st2.cpu.clone(),
+        cpu_cores_physical: st2.cores_physical,
+        cpu_cores_logical: st2.cores_logical,
+        ram_total_gb: s.ram_total_gb, os: st2.os.clone(), gpu: None, gpu_vram_gb: None,
+        gpu_driver: None, gpu_error: None,
+    };
+    Json(serde_json::to_value(out).unwrap())
+}
+
+/// Python's `set_profile` (main.py:189): absent or `null` leaves the stored value unchanged,
+/// present (including `""`) overwrites; the reply is the bare `{"name", "notes"}` dict.
+///
+/// The extractor is load-bearing, not decoration, for the same reason as
+/// `run_test_placeholder`: the brief's plain `Json(req)` would answer a malformed body with
+/// axum's plain-text 400, while the binding constraint (and FastAPI) demand 422 `{"detail":
+/// [ ... ]}`. `Result<Json<_>, JsonRejection>` routes the rejection through
+/// `ValidationErrors`; the data-error vs syntax-error split stays Task 5's job, as there.
+pub async fn set_profile(
+    State(st): State<AppState>,
+    body: Result<Json<ProfileReq>, JsonRejection>,
+) -> Response {
+    let req = match body {
+        Ok(Json(req)) => req,
+        Err(rejection) => return ValidationErrors::json_invalid(&rejection.body_text(), 0).into_response(),
+    };
+    let p = st.db.set_profile(req.name.as_deref(), req.notes.as_deref()).await;
+    Json(json!({ "name": p.name, "notes": p.notes })).into_response()
 }
 
 /// Placeholder until Task 5 implements the benchmark. The extractor is load-bearing, not

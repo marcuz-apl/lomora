@@ -24,7 +24,14 @@ pub async fn spawn_app() -> (String, tokio::task::JoinHandle<()>) {
     // per-request client.
     let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300))
         .pool_max_idle_per_host(64).build().unwrap();
-    let state = lomora::app::AppState::new(cfg, hw, http);
+    // `Db::default_profile()` is an in-memory SQLite database: each test that calls
+    // `spawn_app` gets its own isolated profile row, no shared file, no cross-test
+    // interference, and nothing written into the repo. `read_profile_static()` runs once per
+    // app, mirroring `main.rs` (ruling R4) — the profile fields in test responses are this
+    // machine's real values, which is what `default_profile_name_is_my_workstation` asserts.
+    let db = lomora::store::Db::default_profile();
+    let sys = lomora::hw::read_profile_static();
+    let state = lomora::app::AppState::new(cfg, hw, http, db, sys);
     let handle = tokio::spawn(async move {
         axum::serve(listener, lomora::app::build_router(state)).await.unwrap();
     });
