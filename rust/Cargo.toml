@@ -1,0 +1,33 @@
+[package]
+name = "lomora"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "lomora"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lomora"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8.9"
+tokio = { version = "1.54.1", features = ["full"] }
+reqwest = { version = "0.13.5", features = ["json", "stream"] }
+tower-http = { version = "0.7.1", features = ["cors"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+sysinfo = "0.40.1"
+nvml-wrapper = "0.13.0"
+rust-embed = "8.13.0"
+serde = { version = "1.0.229", features = ["derive"] }
+# preserve_order is load-bearing: without it serde_json sorts object keys alphabetically,
+# so `json!` bodies (error.rs) and the Task 8 order check would both silently disagree with
+# Python's dict insertion order.
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+futures-util = "0.3.34"
+mime_guess = "2.0.5"
+anyhow = "1"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["full"] }

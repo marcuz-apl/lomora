@@ -7,3 +7,5 @@ __pycache__/
 
 .superpowers/
 target/
+rust/target/
+lomora.db

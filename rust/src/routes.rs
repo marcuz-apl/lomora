@@ -1,0 +1,23 @@
+use axum::Json;
+use axum::extract::rejection::JsonRejection;
+use axum::response::{IntoResponse, Response};
+use serde_json::{Value, json};
+
+use crate::error::ValidationErrors;
+use crate::models::TestReq;
+
+/// Placeholder until Task 7 wires this to SQLite. Python returns oldest-first.
+pub async fn get_history() -> Json<Value> {
+    Json(json!([]))
+}
+
+/// Placeholder until Task 5 implements the benchmark. The extractor is load-bearing, not
+/// decoration: `Result<Json<_>, _>` lets axum parse the body and hand the rejection here,
+/// so a malformed body answers 422 with a `detail` array exactly like FastAPI does, while
+/// `Json<TestReq>` alone would answer a plain-text 400.
+pub async fn run_test_placeholder(body: Result<Json<TestReq>, JsonRejection>) -> Response {
+    match body {
+        Ok(Json(_req)) => Json(json!({"error": "not implemented"})).into_response(),
+        Err(rejection) => ValidationErrors::json_invalid(&rejection.body_text()).into_response(),
+    }
+}

@@ -1,0 +1,47 @@
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::json;
+
+/// Python returns HTTP 200 with {"error": ...}; index.html reads data.error after
+/// r.json(). A 4xx here would break the dashboard silently.
+pub struct AppError(pub String);
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        (StatusCode::OK, Json(json!({ "error": self.0 }))).into_response()
+    }
+}
+
+impl From<anyhow::Error> for AppError {
+    fn from(e: anyhow::Error) -> AppError { AppError(e.to_string()) }
+}
+
+/// pydantic answers 422 with a "detail" array before the handler runs. Mirrored, not
+/// "fixed" into a friendly 200, because wire parity is the goal. See spec 5.1.
+pub struct ValidationErrors(pub serde_json::Value);
+
+impl ValidationErrors {
+    pub fn from_field(field: &str, msg: &str, kind: &str) -> ValidationErrors {
+        ValidationErrors(json!({ "detail": [
+            { "type": kind, "loc": ["body", field], "msg": msg, "input": null }
+        ]}))
+    }
+
+    /// FastAPI's answer to an unparseable body: `json_invalid`, located at the byte offset
+    /// inside `body`. axum hands back a plain-text 400 for exactly this case (it reserves
+    /// 422 for well-formed JSON that does not fit the model), so handlers take
+    /// `Result<Json<_>, JsonRejection>` and route the failure through here instead.
+    pub fn json_invalid(msg: &str) -> ValidationErrors {
+        ValidationErrors(json!({ "detail": [
+            { "type": "json_invalid", "loc": ["body", 0], "msg": "JSON decode error",
+              "input": {}, "ctx": { "error": msg } }
+        ]}))
+    }
+}
+
+impl IntoResponse for ValidationErrors {
+    fn into_response(self) -> Response {
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(self.0)).into_response()
+    }
+}
