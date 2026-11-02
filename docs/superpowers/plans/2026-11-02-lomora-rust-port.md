@@ -984,7 +984,7 @@ git commit -m "Add shared reqwest client and /api/models with live Ollama parity
 **Interfaces:**
 - Consumes: `Config.db_path`.
 - Produces:
-  - `Db(Arc<tokio::sync::Mutex<rusqlite::Connection>>)` — `Db::open(path: &Path) -> anyhow::Result<Db>`, `Db::default_profile() -> Db` (in-memory, for tests)
+  - `Db(Arc<tokio::sync::Mutex<rusqlite::Connection>>)` — `Db::open(path: &Path) -> anyhow::Result<Db>`, `Db::in_memory() -> Db` (in-memory, for tests)
   - `struct RunRow { kind: String, timestamp: String, model: String, max_tokens: i64, ttft_ms: Option<f64>, total_s: f64, tokens: i64, tok_per_s: f64, concurrency: Option<i64>, base_url: Option<String> }`
   - `Db::insert_run(&self, r: &RunRow) -> anyhow::Result<()>`
   - `Db::recent_runs(&self, limit: i64) -> anyhow::Result<Vec<RunRow>>` — **oldest-first**
@@ -1076,7 +1076,7 @@ impl Db {
         conn.execute_batch(SCHEMA)?;
         Ok(Db(Arc::new(Mutex::new(conn))))
     }
-    pub fn default_profile() -> Db {
+    pub fn in_memory() -> Db {
         let conn = Connection::open_in_memory().expect("in-memory sqlite");
         conn.execute_batch(SCHEMA).expect("schema");
         Db(Arc::new(Mutex::new(conn)))
@@ -1209,7 +1209,7 @@ pub async fn set_profile(State(st): State<AppState>, Json(req): Json<crate::mode
 }
 ```
 
-Wire `pub db: Db` into `AppState`, register both routes, and give `main.rs` `Db::open(&cfg.db_path)?`. In `spawn_app`, use `Db::default_profile()` so each test gets an isolated database — no shared file, no cross-test interference.
+Wire `pub db: Db` into `AppState`, register both routes, and give `main.rs` `Db::open(&cfg.db_path)?`. In `spawn_app`, use `Db::in_memory()` so each test gets an isolated database — no shared file, no cross-test interference.
 
 The `gpu*` keys stay `None` in this task; Task 6 fills them from the `Gpu` trait, which is why `hw.rs` already declares `name`, `vram_gb`, and `driver`.
 
@@ -1976,7 +1976,7 @@ pub async fn get_history(State(st): State<AppState>) -> Json<Value> {
 }
 ```
 
-`tests/support/mod.rs` gains `fresh_app_on_db(mock, path)` that opens a real `Db` at `path` rather than `Db::default_profile()`, so the restart test can build two apps over one file.
+`tests/support/mod.rs` gains `fresh_app_on_db(mock, path)` that opens a real `Db` at `path` rather than `Db::in_memory()`, so the restart test can build two apps over one file.
 
 - [ ] **Step 4: Run to verify they pass**
 
