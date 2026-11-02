@@ -1202,6 +1202,7 @@ Task Manager once and confirm it before moving on.
 
 Add `pub sys: ProfileStatic` to `AppState` and populate it in `AppState::new`.
 
+```rust
 pub async fn set_profile(State(st): State<AppState>, Json(req): Json<crate::models::ProfileReq>) -> Json<Value> {
     let p = st.db.set_profile(req.name.as_deref(), req.notes.as_deref()).await;
     Json(serde_json::json!({ "name": p.name, "notes": p.notes }))
