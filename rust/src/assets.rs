@@ -22,12 +22,21 @@ fn rel_path(path: Option<String>) -> Option<String> {
     Some(if trimmed.is_empty() { "index.html".to_string() } else { trimmed.to_string() })
 }
 
+/// Starlette's `FileResponse` appends `; charset=utf-8` to every `text/*` type (measured live:
+/// Python answers `text/html; charset=utf-8`), so the Rust side must too — without it the two
+/// servers disagree on the dashboard's own response header. Binary types (there are none today)
+/// pass through untouched.
+fn content_type(rel: &str) -> String {
+    let ctype = mime_guess::from_path(rel).first_or_text_plain().to_string();
+    if ctype.starts_with("text/") { format!("{ctype}; charset=utf-8") } else { ctype }
+}
+
 pub async fn serve(path: Option<String>) -> Response<Body> {
     let Some(rel) = rel_path(path) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
     if let Some(f) = Asset::get(&rel) {
-        let ctype = mime_guess::from_path(&rel).first_or_text_plain().to_string();
+        let ctype = content_type(&rel);
         return (StatusCode::OK, [("content-type", ctype)], String::from_utf8_lossy(f.data.as_ref()).into_owned())
             .into_response();
     }
@@ -41,7 +50,7 @@ pub async fn serve_dir(dir: std::path::PathBuf, path: Option<String>) -> Respons
     let file = dir.join(&rel);
     if file.is_file() {
         let bytes = tokio::fs::read(&file).await.unwrap_or_default();
-        let ctype = mime_guess::from_path(&rel).first_or_text_plain().to_string();
+        let ctype = content_type(&rel);
         return (StatusCode::OK, [("content-type", ctype)], Body::from(bytes)).into_response();
     }
     (StatusCode::NOT_FOUND, "not found").into_response()

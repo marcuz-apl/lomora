@@ -35,7 +35,7 @@ anyhow = "1"
 # Only `to_rfc3339()` (store.rs `created_at`) and, in later tasks, `format("%H:%M:%S")`. No
 # `serde` feature: nothing serializes a chrono value — every timestamp leaves the crate as a
 # string that is formatted before it reaches SQL or JSON.
-chrono = "0.4"
+chrono = "0.4.45"
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["full"] }

@@ -5,7 +5,7 @@
 // `unused_imports` is allowed because this module is compiled into every test binary, and
 // binaries that only call `spawn_app` would otherwise fail to build for wanting a mock.
 #[allow(unused_imports)]
-pub use lomora::mock::{spawn_mock, spawn_mock_sparse};
+pub use lomora::mock::{spawn_mock, spawn_mock_models, spawn_mock_sparse};
 
 /// Binds port 0, lets the OS pick an ephemeral port, and returns the base URL plus the
 /// server task. Every later task's tests go through here.

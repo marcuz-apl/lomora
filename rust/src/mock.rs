@@ -54,6 +54,16 @@ pub async fn spawn_mock_sparse() -> (String, tokio::task::JoinHandle<()>) {
     spawn(sparse_router()).await
 }
 
+/// A `/v1/models` endpoint with a caller-chosen status and body, for the two error arms of
+/// `list_models` that a healthy mock cannot reach: a non-2xx status and a 2xx body that is not
+/// valid JSON. Only the models route is registered — these tests never complete a run.
+pub async fn spawn_mock_models(status: u16, body: &'static str)
+    -> (String, tokio::task::JoinHandle<()>)
+{
+    let code = axum::http::StatusCode::from_u16(status).expect("test status code");
+    spawn(Router::new().route("/v1/models", get(move || async move { (code, body) }))).await
+}
+
 /// Binds an ephemeral port so parallel tests never collide, and returns the base URL plus the
 /// server task. Dropping the task's runtime ends the mock with it.
 async fn spawn(app: Router) -> (String, tokio::task::JoinHandle<()>) {

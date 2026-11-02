@@ -49,3 +49,45 @@ async fn entries_without_a_usable_id_are_dropped() {
     assert_eq!(v.as_array().unwrap().iter().map(|m| m.as_str().unwrap()).collect::<Vec<_>>(),
                vec!["real-one"]);
 }
+
+// The non-2xx arm: Python calls `r.raise_for_status()` and answers `{"error": str(e)}`; this
+// port answers the same envelope with `status.to_string()`. Only the wording of the message
+// differs (httpx says "Server error '500 Internal Server Error' for url '…'"), per spec
+// deviation 1 — the HTTP status, content type and single-key shape are what the UI consumes.
+#[tokio::test]
+async fn upstream_error_status_is_200_with_error_object() {
+    let (mock, _m) = support::spawn_mock_models(500, "boom").await;
+    let (base, _h) = spawn_app().await;
+    let resp = reqwest::get(format!("{base}/api/models?base_url={mock}")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: Value = resp.json().await.unwrap();
+    assert!(!v.is_array(), "an upstream failure must not look like a model list, got {v}");
+    assert_eq!(v.as_object().map(|o| o.keys().map(String::as_str).collect::<Vec<_>>()),
+               Some(vec!["error"]));
+    assert!(v["error"].as_str().is_some_and(|s| !s.is_empty()), "{v}");
+}
+
+// The decode-failure arm: a 2xx that is not JSON must not panic or answer an array.
+#[tokio::test]
+async fn undecodable_success_body_is_200_with_error_object() {
+    let (mock, _m) = support::spawn_mock_models(200, "not json").await;
+    let (base, _h) = spawn_app().await;
+    let resp = reqwest::get(format!("{base}/api/models?base_url={mock}")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: Value = resp.json().await.unwrap();
+    assert!(!v.is_array(), "a decode failure must not look like a model list, got {v}");
+    assert!(v["error"].as_str().is_some_and(|s| !s.is_empty()), "{v}");
+}
+
+// Documented deviation: Python's `data.get("data", [])` raises AttributeError on a non-object
+// 2xx body, so it answers `{"error": …}`; this port reads `.get("data")` on any JSON value and
+// answers an empty list. Pinned here so the difference is a decision, not an accident — the
+// dashboard treats both as "no models" and neither crashes.
+#[tokio::test]
+async fn non_object_success_body_is_an_empty_list() {
+    let (mock, _m) = support::spawn_mock_models(200, "[]").await;
+    let (base, _h) = spawn_app().await;
+    let v: Value = reqwest::get(format!("{base}/api/models?base_url={mock}")).await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(v, Value::Array(vec![]));
+}
