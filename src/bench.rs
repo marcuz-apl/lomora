@@ -1,6 +1,6 @@
-/// Python's round() is round-half-to-even; f64::round is half-away-from-zero and the two
-/// disagree on exact ties. Rust's float formatting is correctly rounded, so format-then-
-/// parse reproduces CPython. Spec 5.1.
+/// Round half-to-even (banker's rounding), not `f64::round`'s half-away-from-zero — the two
+/// disagree on exact ties. Rust's float formatting is correctly rounded, so format-then-parse
+/// gives the required result digit for digit.
 pub fn round_half_even(x: f64, digits: u32) -> f64 {
     match format!("{:.*}", digits as usize, x).parse::<f64>() {
         Ok(v) => v,
@@ -8,10 +8,9 @@ pub fn round_half_even(x: f64, digits: u32) -> f64 {
     }
 }
 
-/// Incremental SSE line scanner. reqwest hands us arbitrary byte chunks; a Python
-/// `aiter_lines()` hides that a "data: " line can straddle two of them. Buffers to
-/// newlines and reproduces the Python predicate exactly
-/// (main.py:101 `line.startswith("data: ") and "[DONE]" not in line`).
+/// Incremental SSE line scanner. reqwest hands us arbitrary byte chunks, and a "data: " line
+/// can straddle two of them. Buffers to newlines and accepts exactly
+/// `line.starts_with("data: ") && !line.contains("[DONE]")`.
 /// `push` answers `true` only on the chunk that completes the first accepted line; every
 /// later chunk answers `false`, so the route timestamps exactly one line.
 #[derive(Default)]
@@ -36,7 +35,7 @@ impl SseScanner {
 }
 
 /// The numbers `POST /api/stress` reports, built from the finished fan-out. Kept free of Axum
-/// and HTTP so every rounding rule from main.py:236-252 is pinned by unit tests.
+/// and HTTP so every rounding rule below is pinned by unit tests.
 #[derive(Clone, Debug)]
 pub struct StressAggregate {
     pub success: usize, pub errors: usize, pub error_samples: Vec<String>,
@@ -44,9 +43,9 @@ pub struct StressAggregate {
     pub total_tokens: i64, pub agg_tok_per_s: f64, pub req_per_s: f64,
 }
 
-/// Python's aggregate block: `sum(tokens_list)`, `round(sum/len, 3)` for the average,
-/// `pct(0.95)` for p95, `round(total/wall, 1)`, `round(success/wall, 2)`, and the first five
-/// error messages. An empty latency list yields `None` (Python's `None`), never 0.0.
+/// The aggregate block: `sum(tokens)`, `round(sum/len, 3)` for the average, `pct(0.95)` for
+/// p95, `round(total/wall, 1)`, `round(success/wall, 2)`, and the first five error messages.
+/// An empty latency list yields `None`, never 0.0.
 pub fn from_samples(latencies: &[f64], tokens: &[i64], errors: &[String],
                     success: usize, wall: f64) -> StressAggregate {
     let total_tokens: i64 = tokens.iter().sum();
@@ -66,9 +65,9 @@ pub fn from_samples(latencies: &[f64], tokens: &[i64], errors: &[String],
     }
 }
 
-/// Python: s = sorted(l); idx = min(len-1, int(round(p*(len-1)))); returns None if empty.
-/// The inner round is half-to-even, so this replicates the index rule rather than
-/// delegating to a percentile crate. Spec 5.1.
+/// Index rule: s = sorted(l); idx = min(len-1, round_half_even(p*(len-1))); `None` if empty.
+/// The inner round is half-to-even, so this replicates the index rule rather than delegating
+/// to a percentile crate.
 pub fn percentile_at(sorted: &mut [f64], p: f64) -> Option<f64> {
     if sorted.is_empty() { return None; }
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -80,8 +79,8 @@ pub fn percentile_at(sorted: &mut [f64], p: f64) -> Option<f64> {
 mod tests {
     use super::round_half_even;
 
-    // Expected values are CPython's answers, measured against the reference interpreter rather
-    // than reasoned out: round(0.125, 2)=0.12, round(0.135, 2)=0.14, round(1.5)=2, round(2.5)=2,
+    // Expected values are the pinned half-to-even results, not reasoned out:
+    // round(0.125, 2)=0.12, round(0.135, 2)=0.14, round(1.5)=2, round(2.5)=2,
     // round(0.5)=0, round(3.5)=4, round(1.25, 1)=1.2, round(10155.5)=10156. The implementation
     // reproduces all eight. Note 1.5 goes UP to 2 — the even neighbour of a tie is not always
     // the lower one, and `half-away-from-zero` would give the same 2, so 2.5 and 0.5 are the
@@ -98,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn rounds_mebibyte_ties_like_pynvml() {
+    fn rounds_mebibyte_ties_half_to_even() {
         assert_eq!(round_half_even(10155.5, 0), 10156.0);
     }
 
@@ -138,7 +137,7 @@ mod sse_tests {
 
     #[test]
     fn done_line_is_skipped_and_scanning_continues() {
-        // Python: `if line.startswith("data: ") and "[DONE]" not in line` then break.
+        // The predicate is `line.starts_with("data: ") && !line.contains("[DONE]")`.
         // A [DONE] line does NOT stop the loop, it is simply not accepted.
         let mut s = SseScanner::default();
         assert!(!s.push(b"data: [DONE]\n\n"));
@@ -150,7 +149,7 @@ mod sse_tests {
     fn non_data_lines_are_ignored() {
         let mut s = SseScanner::default();
         assert!(!s.push(b"event: message\nid: 1\n\n"));
-        assert!(!s.push(b"data:ok\n\n")); // no space after colon: Python requires "data: "
+        assert!(!s.push(b"data:ok\n\n")); // no space after colon: the prefix is "data: "
         assert!(s.push(b"data: now\n\n"));
     }
 
@@ -162,8 +161,8 @@ mod sse_tests {
     }
 
     // The TTFT loop must not stop on a [DONE]-only stream: `finished()` staying false is what
-    // makes the route fall through to `None` -> `"ttft_ms": null`, Python's behavior when no
-    // accepted data line ever arrives (`if line.startswith("data: ") ...` never fires).
+    // makes the route fall through to `None` -> `"ttft_ms": null` when no accepted data line
+    // ever arrives (`line.starts_with("data: ") ...` never fires).
     #[test]
     fn a_stream_of_only_non_data_lines_never_fires() {
         let mut s = SseScanner::default();
@@ -173,8 +172,8 @@ mod sse_tests {
         assert!(!s.finished());
     }
 
-    // CRLF transport (LM Studio / uvicorn split on \r\n): the line terminator must not make
-    // Python's `startswith("data: ")` fail after aiter_lines() has already stripped it.
+    // CRLF transport (LM Studio splits on \r\n): the line terminator must not make the
+    // "data: " prefix fail after trimming.
     #[test]
     fn crlf_lines_are_scanned_like_lf_lines() {
         let mut s = SseScanner::default();
@@ -209,7 +208,7 @@ mod agg_tests {
     }
 
     #[test]
-    fn p95_index_matches_the_python_rule_on_a_small_set() {
+    fn p95_index_follows_the_rounded_index_rule() {
         // len 4: idx = min(3, round_ties_even(0.95*3 = 2.85...)) -> sorted[3].
         let lat = [0.1, 0.2, 0.3, 0.9];
         let a = from_samples(&lat, &[1, 1, 1, 1], &[], 4, 1.0);
@@ -234,11 +233,10 @@ mod agg_tests {
         assert_eq!(a.req_per_s, 0.0);
     }
 
-    // Python sums `tokens_list` and divides by the wall clock it measured around the gather;
-    // the aggregate reports exactly the numbers it was given, rounding wall (2), avg/p95 (3),
-    // throughput (1) and request rate (2) as main.py does.
+    // The aggregate sums `tokens` and divides by the measured wall clock; it reports exactly the
+    // numbers it was given, rounding wall (2), avg/p95 (3), throughput (1) and request rate (2).
     #[test]
-    fn rounding_matches_the_python_rounds_per_field() {
+    fn rounding_covers_each_reported_field() {
         let a = from_samples(&[1.0, 2.0, 3.0], &[5, 5, 5], &[], 3, 2.345);
         assert_eq!(a.total_tokens, 15);
         assert_eq!(a.avg_latency_s, Some(2.0));
@@ -253,8 +251,7 @@ mod agg_tests {
 mod percentile_tests {
     use super::percentile_at;
 
-    // Index rule from main.py's stress path: `idx = min(len-1, int(round(p*(len-1))))`, with
-    // CPython's round() being half-to-even — verified against `python` on this box, not derived.
+    // Index rule: `idx = min(len-1, round_half_even(p*(len-1)))`, with the tie going to even.
     #[test]
     fn empty_input_has_no_percentile() {
         assert_eq!(percentile_at(&mut [], 0.5), None);

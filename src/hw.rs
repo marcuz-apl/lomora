@@ -1,7 +1,6 @@
 //! Background hardware sampler. The only module in the crate that reads system counters:
 //! `routes.rs` serves the last published snapshot instead of touching `sysinfo`/NVML itself,
-//! which is what replaces Python's blocking `psutil.cpu_percent(interval=0.1)` inside its
-//! async handler.
+//! so request handlers never block on a system scan.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +8,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
-/// Instantaneous GPU counters, already converted to the units Python reports (MiB, degrees C).
+/// Instantaneous GPU counters, already converted to the wire units (MiB, degrees C).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GpuSnapshot {
     pub util: u32,
@@ -29,9 +28,9 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// Wire shape for `GET /api/hardware`, kept here so the key order is one reviewed list and
-    /// unit-testable without real hardware. Key order is Python's dict insertion order: the
-    /// base four first, then the GPU four appended by `d.update(...)` — and when there is no
-    /// GPU those keys are *absent*, never emitted as `null`.
+    /// unit-testable without real hardware. The key order is fixed: the base four first, then
+    /// the GPU four appended — and when there is no GPU those keys are *absent*, never emitted
+    /// as `null`.
     pub fn to_json(&self) -> Value {
         let mut v = json!({
             "cpu_percent": self.cpu_percent,
@@ -50,10 +49,9 @@ impl Snapshot {
 }
 
 pub trait Gpu: Send + Sync {
-    /// Python's `HAS_GPU`: whether NVML was initialised at startup at all. It separates the
-    /// profile endpoint's two branches — `available()` false answers `gpu: "None detected"`,
-    /// true answers the card's own fields or, if any query fails, `gpu_error`
-    /// (main.py:178-186).
+    /// Whether NVML was initialised at startup at all. It separates the profile endpoint's two
+    /// branches — `available()` false answers `gpu: "None detected"`, true answers the card's
+    /// own fields or, if any query fails, `gpu_error`.
     fn available(&self) -> bool { false }
     fn sample(&self) -> Option<GpuSnapshot>;
     fn name(&self) -> Option<String>;
@@ -81,8 +79,8 @@ impl Gpu for NoGpu {
     }
 }
 
-/// NVIDIA via NVML. Python reads index 0 only (`nvmlDeviceGetHandleByIndex(0)`), so this does
-/// too even though the development machine has two cards.
+/// NVIDIA via NVML. Only device index 0 is read, even though the development machine has two
+/// cards.
 pub struct NvmlGpu {
     nvml: nvml_wrapper::Nvml,
     index: u32,
@@ -90,7 +88,7 @@ pub struct NvmlGpu {
 
 impl NvmlGpu {
     /// `None` rather than an error: `/api/hardware` has no failure path, it just omits the GPU
-    /// keys, exactly like Python's `HAS_GPU` flag.
+    /// keys, the same as an unavailable GPU.
     pub fn open(index: u32) -> Option<NvmlGpu> {
         match nvml_wrapper::Nvml::init() {
             Ok(nvml) if nvml.device_by_index(index).is_ok() => Some(NvmlGpu { nvml, index }),
@@ -98,32 +96,32 @@ impl NvmlGpu {
         }
     }
 
-    /// Bytes -> MiB with Python's `round(x / 1024**2)` (half-to-even), not integer truncation.
+    /// Bytes -> MiB with half-to-even rounding, not integer truncation.
     fn mib(bytes: u64) -> u64 {
         crate::bench::round_half_even(bytes as f64 / 1_048_576.0, 0) as u64
     }
 }
 
 impl Gpu for NvmlGpu {
-    /// `NvmlGpu` only exists after a successful `Nvml::init()` + device lookup, which is
-    /// exactly Python's `HAS_GPU = True` (main.py:18-23).
+    /// `NvmlGpu` only exists after a successful `Nvml::init()` + device lookup, so availability
+    /// is simply true.
     fn available(&self) -> bool { true }
 
     fn sample(&self) -> Option<GpuSnapshot> {
         let dev = self.nvml.device_by_index(self.index).ok()?;
-        // nvml-wrapper 0.13 renamed the accessors the plan named: `memory_usage()` is now
-        // `memory_info()`, and `temperature()` now takes a sensor.
+        // nvml-wrapper 0.13 accessors: `memory_usage()` is now `memory_info()`, and
+        // `temperature()` now takes a sensor.
         let util = dev.utilization_rates().ok()?;
         let mem = dev.memory_info().ok()?;
         let temp = dev.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu).ok()?;
         Some(GpuSnapshot {
             util: util.gpu,
             // `memory_info()` wraps the *v2* entry point, whose `used` excludes the driver's
-            // `reserved` block; pynvml's `nvmlDeviceGetMemoryInfo` is v1, which folds reserved
-            // into `used`. Measured here: v2 used 10_492_792_832 + reserved 156_237_824 == v1
-            // used 10_649_030_656, i.e. Python's 10156 MiB against 10007 MiB for v2 alone.
-            // Adding reserved back keeps `gpu_mem_mb` byte-identical to Python. `total` is the
-            // same in both versions, so `gpu_mem_tot` needs no such correction.
+            // `reserved` block; NVML's v1 counter folds reserved into `used`. On this machine
+            // v2 used 10_492_792_832 + reserved 156_237_824 == v1 used 10_649_030_656, i.e.
+            // 10156 MiB against 10007 MiB for v2 alone. Adding reserved back keeps
+            // `gpu_mem_mb` consistent with the v1 reading. `total` is the same in both
+            // versions, so `gpu_mem_tot` needs no such correction.
             mem_used_mb: Self::mib(mem.used + mem.reserved),
             mem_total_mb: Self::mib(mem.total),
             temp_c: temp as i32,
@@ -149,30 +147,27 @@ impl Gpu for NvmlGpu {
 #[derive(Clone)]
 pub struct Sampler(Arc<RwLock<Snapshot>>);
 
-/// Immutable machine facts for `GET /api/profile`, captured once at startup (ruling R4).
-/// Python rebuilds these with `platform`/`psutil` on every poll of the profile endpoint —
-/// a per-request cost the port treats as a defect, not a behavior: parity is on values, not
-/// on when they are measured. `ram_total_gb` is deliberately not here: it already lives in
-/// the `Sampler`'s cached snapshot, which refreshes on its own cadence.
+/// Immutable machine facts for `GET /api/profile`, captured once at startup. Rebuilding them
+/// on every poll would add a per-request system scan to an async handler — a cost this design
+/// avoids; the values are constants for the life of the process anyway. `ram_total_gb` is
+/// deliberately not here: it already lives in the `Sampler`'s cached snapshot, which refreshes
+/// on its own cadence.
 #[derive(Clone, Debug)]
 pub struct ProfileStatic { pub cpu: String, pub cores_physical: Option<usize>,
                            pub cores_logical: usize, pub os: String }
 
 /// Read the startup-time profile facts. `routes.rs` must never call this per request — nor
 /// build a `System::new_all()` in a handler, whose `refresh_all()` walks the process table
-/// and is the same class of mistake as the blocking `psutil` call this port exists to remove.
+/// and blocks the async runtime.
 pub fn read_profile_static() -> ProfileStatic {
     let cores_logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    // Python emits `f"{platform.system()} {platform.release()}"`; shape match only,
-    // spec deviation 3.
+    // `"<os> <release>"`, e.g. `windows 10.0.19045`.
     let os = format!("{} {}", std::env::consts::OS,
                       sysinfo::System::os_version().unwrap_or_default())
         .trim().to_string();
     // sysinfo 0.40.1: `new_all()`, `physical_core_count()` and `os_version()` all return
-    // `Result<_, sysinfo::Error>` (the brief's `Option<usize>` direct-bind and bare
-    // `let mut sys = new_all()` forms do not compile against this version). A failed
-    // `new_all()` means there are no CPU strings to read, so fall back the way Python's
-    // `platform.processor() or "Unknown CPU"` would.
+    // `Result<_, sysinfo::Error>`. A failed `new_all()` means there are no CPU strings to
+    // read, so fall back to `"Unknown CPU"`.
     let Ok(mut sys) = sysinfo::System::new_all() else {
         return ProfileStatic { cpu: "Unknown CPU".to_string(), cores_physical: None,
                                cores_logical, os };
@@ -185,7 +180,7 @@ pub fn read_profile_static() -> ProfileStatic {
 }
 
 /// sysinfo 0.40 reports memory in bytes (measured: total_memory()=240_148_307_968 on this
-/// machine, which divided by 1024^3 is 223.66 — exactly Python's `ram_total_gb`).
+/// machine, which divided by 1024^3 is 223.66 GiB).
 const BYTES_PER_GIB: f64 = 1_073_741_824.0;
 
 impl Sampler {
@@ -235,7 +230,7 @@ impl Sampler {
 }
 
 /// One reading of the machine. Both call sites (seed and loop) go through here so the
-/// rounding matches Python's `round(x, n)` exactly, digit for digit.
+/// rounding is consistent, digit for digit.
 fn snap(sys: &sysinfo::System, gpu: &dyn Gpu) -> Snapshot {
     // `as f64` on byte counts: 240 GB is far below 2^53, so the conversion is exact.
     let total = sys.total_memory() as f64;
@@ -260,10 +255,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    // routes.rs only ever forwards to this, so the two Python-response shapes are pinned here:
+    // routes.rs only ever forwards to this, so both wire shapes are pinned here:
     // no hardware means the GPU keys are absent, hardware means they follow the base four.
     #[test]
-    fn gpu_keys_are_appended_after_the_base_four_in_python_order() {
+    fn gpu_keys_are_appended_after_the_base_four() {
         let snap = Snapshot {
             cpu_percent: 4.7,
             ram_percent: 27.6,
@@ -300,21 +295,21 @@ mod tests {
     }
 
     // `gpu_mem_tot` = 16384 on the P5000 comes from this divisor, not from NVML itself, so pin
-    // it here where no driver is required. Python rounds (`round(x / 1024**2)`), it does not
-    // truncate, so the tie case has to round up to the even integer like CPython does.
+    // it here where no driver is required. The conversion rounds half-to-even rather than
+    // truncating, so the tie case goes to the even integer.
     #[test]
-    fn bytes_convert_to_mebibytes_the_way_pynvml_rounds() {
+    fn bytes_convert_to_mebibytes_with_half_to_even_rounding() {
         use super::NvmlGpu;
         assert_eq!(NvmlGpu::mib(17_179_869_184), 16384);
         assert_eq!(NvmlGpu::mib(10_648_289_280), 10155);
         assert_eq!(NvmlGpu::mib(10_648_813_568), 10156); // 10155.5 MiB, a tie
     }
 
-    // Byte counts measured live off the P5000 (driver 582.67). pynvml's v1 `used` equals
-    // nvml-wrapper's v2 `used + reserved`, and both land on the 10156 MiB Python reports; v2
-    // `used` alone would have reported 10007.
+    // Byte counts measured live off the P5000 (driver 582.67). NVML's v1 `used` equals
+    // nvml-wrapper's v2 `used + reserved`, and both land on 10156 MiB; v2 `used` alone would
+    // report 10007.
     #[test]
-    fn nvml_v2_used_plus_reserved_reproduces_pynvml_v1_used() {
+    fn nvml_v2_used_plus_reserved_matches_the_v1_counter() {
         use super::NvmlGpu;
         assert_eq!(NvmlGpu::mib(10_492_792_832 + 156_237_824), 10156);
         assert_eq!(NvmlGpu::mib(10_492_792_832), 10007);

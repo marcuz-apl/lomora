@@ -3,8 +3,7 @@ name = "lomora"
 version = "0.1.0"
 edition = "2024"
 # Required since src/bin/mock_upstream.rs exists: without it `cargo run` refuses to guess
-# between the `lomora` and `mock_upstream` binaries, and every live-parity step in the plan
-# (Task 3 Step 6, Task 8's smoke run) runs plain `cargo run`.
+# between the `lomora` and `mock_upstream` binaries, and plain `cargo run` should start the server.
 default-run = "lomora"
 
 [lib]
@@ -26,15 +25,14 @@ nvml-wrapper = "0.13.0"
 rust-embed = "8.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
 # preserve_order is load-bearing: without it serde_json sorts object keys alphabetically,
-# so `json!` bodies (error.rs) and the Task 8 order check would both silently disagree with
-# Python's dict insertion order.
+# so `json!` bodies (error.rs) would silently disagree with the documented key order.
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 futures-util = "0.3.34"
 mime_guess = "2.0.5"
 anyhow = "1"
-# Only `to_rfc3339()` (store.rs `created_at`) and, in later tasks, `format("%H:%M:%S")`. No
-# `serde` feature: nothing serializes a chrono value — every timestamp leaves the crate as a
-# string that is formatted before it reaches SQL or JSON.
+# Only `to_rfc3339()` (store.rs `created_at`) and `format("%H:%M:%S")`. No `serde` feature:
+# nothing serializes a chrono value — every timestamp leaves the crate as a string that is
+# formatted before it reaches SQL or JSON.
 chrono = "0.4.45"
 # Decompresses HumanEval's `HumanEval.jsonl.gz` (the prompt fetcher's coding source) and nothing
 # else. The default `miniz_oxide` backend keeps it pure Rust, no C toolchain.

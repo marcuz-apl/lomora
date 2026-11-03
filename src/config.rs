@@ -12,19 +12,18 @@ pub struct Config {
     pub prompts_sources: Vec<(String, String)>,
 }
 
-/// Trailing-slash strip, mirroring `os.getenv(...).rstrip("/")` in main.py.
+/// Trailing-slash strip applied to every configured base URL.
 pub fn normalize_base(raw: &str) -> String {
     raw.trim_end_matches('/').to_string()
 }
 
-/// `base = (base_url or LMSTUDIO).rstrip("/")` from main.py: an explicit `base_url` query
-/// param wins, otherwise the configured default. Python's `or` falls back for `None` and `""`;
-/// the `trim()` here additionally falls back for whitespace-only input, which Python would try
-/// to use as a base URL and fail on. No client sends `base_url=%20`, so the difference is
-/// unreachable in practice and the stricter (never-error) side was chosen.
+/// An explicit `base_url` query param wins over the configured default. The fallback covers
+/// `None` and `""`, and the `trim()` here additionally falls back for whitespace-only input,
+/// which would otherwise be used as a base URL and fail upstream. No client sends
+/// `base_url=%20`, so the difference is unreachable in practice and the stricter
+/// (never-error) side was chosen.
 ///
-/// The default itself honours `OLLAMA_URL` as a second choice (see `default_base`), which is
-/// what makes the port's reading of that variable real instead of Python's dead declaration.
+/// The default itself honours `OLLAMA_URL` as a second choice (see `default_base`).
 pub fn resolve_base(cfg: &Config, explicit: Option<&str>) -> String {
     normalize_base(explicit.filter(|s| !s.trim().is_empty()).unwrap_or(&cfg.lmstudio_url))
 }
@@ -32,6 +31,13 @@ pub fn resolve_base(cfg: &Config, explicit: Option<&str>) -> String {
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+/// The default database location: `data/lomora.db` relative to the working directory, so run
+/// history lives beside the app instead of loose in the repo root. `Db::open` creates the
+/// folder when it is missing; `LOMORA_DB` overrides the whole path.
+pub fn default_db_path() -> PathBuf {
+    PathBuf::from("data").join("lomora.db")
 }
 
 /// The three built-in benchmark sources, one per question family. Each URL was fetched and its
@@ -72,9 +78,9 @@ pub fn parse_prompts_sources(env: Option<&str>) -> Vec<(String, String)> {
 /// The server-side default when a request omits `base_url`: an explicit `LMSTUDIO_URL` wins,
 /// then an explicit `OLLAMA_URL`, then LM Studio's conventional address. The dashboard always
 /// sends an explicit `base_url` (the provider dropdown hardcodes both URLs in the page), so
-/// nothing visible changes — but this is the one place Python's unused `OLLAMA_URL`
-/// (`main.py:16`, declared and never read) belongs. Pure so the precedence is testable without
-/// mutating the process environment (`set_var` is unsafe in edition 2024).
+/// nothing visible changes — but this is where `OLLAMA_URL` is honoured as a fallback. Pure so
+/// the precedence is testable without mutating the process environment (`set_var` is unsafe in
+/// edition 2024).
 fn default_base(lmstudio: Option<String>, ollama: Option<String>) -> String {
     normalize_base(&lmstudio.or(ollama).unwrap_or_else(|| "http://localhost:1234".into()))
 }
@@ -86,7 +92,7 @@ impl Config {
             lmstudio_url: default_base(env_set("LMSTUDIO_URL"), env_set("OLLAMA_URL")),
             ollama_url:   normalize_base(&env_or("OLLAMA_URL",   "http://localhost:11434")),
             port: env_or("PORT", "8501").parse().unwrap_or(8501),
-            db_path: PathBuf::from(env_or("LOMORA_DB", "lomora.db")),
+            db_path: env_set("LOMORA_DB").map(PathBuf::from).unwrap_or_else(default_db_path),
             static_dir: std::env::var("LOMORA_STATIC").ok()
                 .filter(|v| !v.trim().is_empty()).map(PathBuf::from),
             prompts_sources: parse_prompts_sources(
@@ -100,7 +106,7 @@ mod tests {
     use super::{Config, default_base, normalize_base, resolve_base};
     use std::path::PathBuf;
 
-    // `OLLAMA_URL` was dead in Python; this pins the one place it is honoured. `from_env` feeds
+    // This pins the one place `OLLAMA_URL` is honoured. `from_env` feeds
     // these same env values into `default_base`, which is the only untestable link (setting the
     // process env from a test is unsafe and would leak across parallel tests).
     #[test]
@@ -110,7 +116,7 @@ mod tests {
         assert_eq!(default_base(None, Some("http://ol:11434/".into())), "http://ol:11434",
                    "Ollama is honoured when LM Studio is not configured");
         assert_eq!(default_base(None, None), "http://localhost:1234",
-                   "neither set keeps Python's own default");
+                   "neither set keeps the conventional default");
     }
 
     #[test]
@@ -129,6 +135,13 @@ mod tests {
             static_dir: None,
             prompts_sources: Vec::new(),
         }
+    }
+
+    // Run history lives under `data/` so the database does not sit loose in the repo root
+    // next to Cargo.toml; `LOMORA_DB` still overrides the whole path.
+    #[test]
+    fn the_default_database_path_is_under_data() {
+        assert_eq!(super::default_db_path(), PathBuf::from("data").join("lomora.db"));
     }
 
     // The env grammar for LOMORA_PROMPTS_URLS: `category=url` pairs, comma-separated; junk

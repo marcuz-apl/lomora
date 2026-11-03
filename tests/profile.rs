@@ -10,12 +10,12 @@ async fn default_profile_name_is_my_workstation() {
     assert_eq!(v["notes"], "");
     let obj = v.as_object().expect("profile must be a JSON object");
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-    // Tests build the app with `NoGpu`, so this is Python's no-NVML branch (main.py:181-182):
-    // the seven base keys, then exactly one GPU key — the string, never a null trio. The whole
-    // list pins order and count, so a regression that emits `"gpu_vram_gb": null` fails.
+    // Tests build the app with `NoGpu`, so this is the no-NVML branch: the seven base keys,
+    // then exactly one GPU key — the string, never a null trio. The whole list pins order and
+    // count, so a regression that emits `"gpu_vram_gb": null` fails.
     assert_eq!(keys, vec!["name", "notes", "cpu", "cpu_cores_physical", "cpu_cores_logical",
                           "ram_total_gb", "os", "gpu"],
-               "base keys in dict order, then Python's `gpu: \"None detected\"`");
+               "base keys in wire order, then the no-GPU `gpu: \"None detected\"` string");
     assert_eq!(obj.len(), 8);
     assert_eq!(obj["gpu"], "None detected");
     for k in ["gpu_vram_gb", "gpu_driver", "gpu_error"] {
@@ -30,9 +30,9 @@ async fn default_profile_name_is_my_workstation() {
     let logical = v["cpu_cores_logical"].as_u64()
         .expect("cpu_cores_logical must be a number, not null or absent");
     assert_eq!(logical, logical_expected, "the API must report this process's core count");
-    // Physical may legitimately be null (Python serializes `psutil.cpu_count(logical=False)`
-    // even when it is None); when it is a number the invariant has to hold. No `unwrap_or(0)`
-    // here — a missing or non-numeric value must fail loudly, not silently satisfy `>=`.
+    // Physical may legitimately be null (the platform may not report a physical core count);
+    // when it is a number the invariant has to hold. No `unwrap_or(0)` here — a missing or
+    // non-numeric value must fail loudly, not silently satisfy `>=`.
     match v["cpu_cores_physical"].as_u64() {
         Some(phys) => assert!(logical >= phys, "{logical} logical cores cannot be below {phys}"),
         None => assert!(v["cpu_cores_physical"].is_null(),
@@ -54,7 +54,7 @@ async fn malformed_profile_body_is_422_not_200() {
     assert_eq!(resp.headers()["content-type"], "application/json");
     let body: Value = resp.json().await.unwrap();
     assert!(body.get("detail").and_then(Value::as_array).is_some_and(|d| !d.is_empty()),
-            "a rejection must answer FastAPI's detail array, got {body}");
+            "a rejection must answer the detail array, got {body}");
 }
 
 #[tokio::test]
@@ -79,10 +79,10 @@ async fn empty_body_leaves_profile_untouched() {
 }
 
 // A failed `UPDATE profile` is a runtime failure, so it must answer HTTP 200 with exactly
-// `{"error": "<message>"}` — the same envelope `AppError` exists for, and the first live
-// consumer of it. The bug this pins: swallowing the write error made the handler read the
-// stale row back and answer `{"name": ..., "notes": ...}`, i.e. a success-shaped body for a
-// lost save (`static/index.html:329` prints "Profile saved" whatever comes back).
+// `{"error": "<message>"}` — the same envelope `AppError` exists for. The bug this pins:
+// swallowing the write error made the handler read the stale row back and answer
+// `{"name": ..., "notes": ...}`, i.e. a success-shaped body for a lost save (the dashboard
+// prints "Profile saved" whatever comes back).
 #[tokio::test]
 async fn profile_write_failure_is_200_error_envelope() {
     let (base, _h) = spawn_app_on_db(lomora::store::Db::profile_writes_fail_for_tests()).await;

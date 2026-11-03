@@ -1,7 +1,7 @@
-//! Structural guard for the port's headline hygiene fix: one `reqwest::Client` per process,
-//! built in `main.rs` (and in the test harness), never inside a handler. Python constructs a
-//! fresh `httpx.AsyncClient` on every request, throwing away the connection pool; a future
-//! handler copied from Python would silently reintroduce that if nothing failed.
+//! Structural guard for the process's connection-pool hygiene: one `reqwest::Client` per
+//! process, built in `main.rs` (and in the test harness), never inside a handler. A
+//! per-request client would still answer every endpoint correctly — only slower — so this
+//! test reads the crate sources at compile time and fails if a handler starts building one.
 //!
 //! A behavioural test cannot see this — a per-request client still answers every endpoint
 //! correctly, only slower — so this reads the crate sources at compile time. It is a

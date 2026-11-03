@@ -1,15 +1,15 @@
-//! In-process mock upstream shared by the integration tests and by Task 8's parity run.
+//! In-process mock upstream shared by the integration tests and the standalone mock binary.
 //!
 //! It answers the three shapes lomora consumes: an OpenAI model list, a non-streaming
 //! completion carrying `usage`, and a streaming completion whose SSE frames are deliberately
-//! split mid-line, so the Task 5 scanner has to buffer across chunk boundaries instead of
+//! split mid-line, so the scanner has to buffer across chunk boundaries instead of
 //! assuming one frame per chunk.
 //!
 //! It lives in the library rather than under `tests/` because `src/bin/mock_upstream.rs` runs
-//! it as a separate OS process that the Python reference server can also call — and neither a
-//! `src/bin/` nor an `examples/` target can import code from `tests/`, which is not part of
-//! the crate. `tests/support/mod.rs` re-exports these functions instead of defining them, so
-//! the in-process and out-of-process mocks can never drift into answering differently.
+//! it as a separate OS process, and neither a `src/bin/` nor an `examples/` target can import
+//! code from `tests/`, which is not part of the crate. `tests/support/mod.rs` re-exports these
+//! functions instead of defining them, so the in-process and out-of-process mocks can never
+//! drift into answering differently.
 
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -31,8 +31,8 @@ pub fn router() -> Router {
 }
 
 /// Identical completion behaviour, but `/v1/models` answers with the four shapes the id
-/// filter has to survive: one usable id, one missing, one empty string (falsy in Python's
-/// `if m.get("id")`), one null.
+/// filter has to survive: one usable id, one missing, one empty string (the filter treats it
+/// as absent), one null.
 pub fn sparse_router() -> Router {
     Router::new()
         .route("/v1/models", get(|| async {
@@ -77,7 +77,7 @@ async fn spawn(app: Router) -> (String, tokio::task::JoinHandle<()>) {
 /// OpenAI completion request carries everything in the body, so a `Query<_>` here would fail to
 /// deserialise for a URL with no query string and every mock call would error for the wrong
 /// reason. Reading the body as text also keeps the stream/BOOM checks working when the caller's
-/// JSON is deliberately malformed (Task 5's failure-path tests).
+/// JSON is deliberately malformed, as the failure-path tests need.
 async fn handle_completion(body: String) -> axum::response::Response {
     let streaming = body.contains("\"stream\":true");
     if body.contains("BOOM") {

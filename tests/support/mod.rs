@@ -17,8 +17,8 @@ pub async fn spawn_app() -> (String, tokio::task::JoinHandle<()>) {
 }
 
 /// The same app over a caller-supplied `Db`, so a test can install a handle whose writes fail
-/// (the profile error-envelope test) or open a real file twice for a restart (Task 7). Everything
-/// else about the app is identical to `spawn_app`.
+/// (the profile error-envelope test) or open a real file twice for a restart. Everything else
+/// about the app is identical to `spawn_app`.
 pub async fn spawn_app_on_db(db: lomora::store::Db) -> (String, tokio::task::JoinHandle<()>) {
     spawn_app_with(lomora::config::Config::from_env(), db).await
 }
@@ -77,16 +77,16 @@ async fn spawn_app_with(cfg: lomora::config::Config, db: lomora::store::Db)
         .await.unwrap();
     let addr = listener.local_addr().unwrap();
     // NoGpu keeps the endpoints deterministic: `/api/hardware` omits its GPU keys and
-    // `/api/profile` answers Python's no-NVML branch, `"gpu": "None detected"`. Real hardware
-    // presence is covered by the live parity sweep, not by the test suite.
+    // `/api/profile` answers the no-NVML branch, `"gpu": "None detected"`. Real hardware
+    // presence is covered by a manual run against the dev machine, not by the test suite.
     let gpu: std::sync::Arc<dyn lomora::hw::Gpu> = std::sync::Arc::new(lomora::hw::NoGpu);
     let hw = lomora::hw::Sampler::spawn(gpu.clone(), std::time::Duration::from_millis(60)).await;
     // Same shared-client shape as main.rs, so tests exercise the pooled path rather than a
     // per-request client.
     let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300))
         .pool_max_idle_per_host(64).build().unwrap();
-    // `read_profile_static()` runs once per app, mirroring `main.rs` (ruling R4) — the profile
-    // fields in test responses are this machine's real values, which is what
+    // `read_profile_static()` runs once per app, mirroring `main.rs` — the profile fields in
+    // test responses are this machine's real values, which is what
     // `default_profile_name_is_my_workstation` asserts.
     let sys = lomora::hw::read_profile_static();
     let state = lomora::app::AppState::new(cfg, hw, http, db, sys, gpu);

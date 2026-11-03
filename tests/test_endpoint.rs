@@ -1,4 +1,4 @@
-//! `POST /api/test` — the probe (main.py:78) and the 422 semantics FastAPI owns.
+//! `POST /api/test` — the probe and the shared 422 semantics.
 //!
 //! Timed values (`ttft_ms`, `total_s`, `tok_per_s`) are asserted structurally or against a
 //! deliberately slow upstream, never by exact number: they are measured, so any absolute
@@ -41,7 +41,7 @@ async fn spawn_upstream(delay_ms: u64, with_data_line: bool)
                     vec!["data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
                          "data: [DONE]\n\n"]
                 } else {
-                    // SSE comments, a named event and a [DONE]: no line Python's predicate accepts.
+                    // SSE comments, a named event and a [DONE]: no line the predicate accepts.
                     vec![": keep-alive\n\n", "event: message\n\n", "data: [DONE]\n\n"]
                 };
                 let s = futures_util::stream::iter(
@@ -57,7 +57,7 @@ async fn spawn_upstream(delay_ms: u64, with_data_line: bool)
 }
 
 /// An upstream that answers the streaming TTFT probe happily but the full completion with a 400,
-/// so Python's second call (`Inference failed: ...`, main.py:120/124) is reachable on its own.
+/// so the `Inference failed: ...` path is reachable on its own.
 async fn spawn_inference_fails() -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap()).await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -77,7 +77,7 @@ async fn spawn_inference_fails() -> (String, tokio::task::JoinHandle<()>) {
 // ── the brief's five ────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn success_body_has_python_key_order_and_types() {
+async fn success_body_has_wire_key_order_and_types() {
     let (mock, _m) = spawn_mock().await;
     let (base, _h) = fresh_app(&mock).await;
     let r = post(&base, json!({"model":"mock-a","base_url":mock,"max_tokens":20})).await;
@@ -90,22 +90,23 @@ async fn success_body_has_python_key_order_and_types() {
     assert_eq!(v["max_tokens"], 20);
     assert!(v["ttft_ms"].as_f64().unwrap() > 0.0, "{v}");
     // `total_s` is `round(elapsed, 2)`, and a local mock completes in single-digit milliseconds,
-    // so parity says this may legitimately be 0.0 — assert the number, not a floor it can't have.
+    // so this may legitimately be 0.0 — assert the number, not a floor it can't have.
     assert!(v["total_s"].is_f64(), "{v}");
     assert!(v["total_s"].as_f64().unwrap() >= 0.0, "{v}");
     assert!(v["tok_per_s"].as_f64().unwrap() > 0.0, "{v}");
-    // `timestamp` is local time `%H:%M:%S` (main.py:133), not RFC3339 and not an epoch.
+    // `timestamp` is local time `%Y-%m-%d %H:%M:%S`, not RFC3339 and not an epoch. The
+    // dashboard prints it verbatim in the history table, and the older time-only `%H:%M:%S`
+    // shape made rows from earlier days look misordered once the table went newest-first — so
+    // the stamp deliberately widens to carry the date.
     let ts = v["timestamp"].as_str().unwrap();
-    assert_eq!(ts.len(), 8, "{ts}");
-    assert_eq!(&ts[2..3], ":");
-    assert_eq!(&ts[5..6], ":");
-    assert!(ts[..2].parse::<u8>().unwrap() < 24, "{ts}");
+    chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
+        .unwrap_or_else(|e| panic!("timestamp must be `%Y-%m-%d %H:%M:%S`, got {ts:?}: {e}"));
 }
 
-/// Python's `tps = round(tok / elapsed, 1)` shares `elapsed` with `total_s = round(elapsed, 2)`,
-/// so the two reported fields must agree. That is only checkable when `total_s` is big enough
+/// `tok_per_s` rounds `tokens / elapsed` to one place and `total_s` rounds the same `elapsed` to
+/// two, so the two reported fields must agree. That is only checkable when `total_s` is big enough
 /// for its own rounding not to swamp the ratio, so this runs against a ~1.1 s upstream: with
-/// `elapsed ~= 1.103` the worst case is |20/1.10 - 20/1.103| ~= 0.05, inside the brief's 0.15.
+/// `elapsed ~= 1.103` the worst case is |20/1.10 - 20/1.103| ~= 0.05, inside the 0.15 tolerance.
 /// Against the instant mock `total_s` quantises to 0.0 and the derived ratio is `inf`, which is
 /// why the assertion belongs on a slow upstream rather than being loosened into meaninglessness.
 #[tokio::test]
@@ -122,8 +123,8 @@ async fn tok_per_s_is_consistent_with_tokens_and_total_s() {
 
 fn crate_consistency(tokens: f64, total_s: f64) -> f64 { tokens / total_s }
 
-/// Both upstream calls fail: Python probes TTFT first, so the prefix is `TTFT probe failed:`, and
-/// the message carries the bare status code (`HTTP 400`), not hyper's `400 Bad Request`.
+/// The TTFT probe runs first, so its failure sets the prefix: `TTFT probe failed:`, and the
+/// message carries the bare status code (`HTTP 400`), not hyper's `400 Bad Request`.
 #[tokio::test]
 async fn upstream_400_becomes_200_with_inference_failed_prefix() {
     let (mock, _m) = spawn_mock().await;
@@ -132,7 +133,7 @@ async fn upstream_400_becomes_200_with_inference_failed_prefix() {
     assert_eq!(r.status(), 200, "a runtime failure is never a 4xx");
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["error"], "TTFT probe failed: HTTP 400: upstream exploded");
-    // Python's envelope is the bare `error` key and nothing else.
+    // The envelope is the bare `error` key and nothing else.
     assert_eq!(keys(&v), ["error"]);
 }
 
@@ -144,7 +145,7 @@ async fn out_of_range_max_tokens_is_422_with_detail() {
     assert_eq!(v["detail"][0], json!({"type": "less_than_equal", "loc": ["body", "max_tokens"],
         "msg": "Input should be less than or equal to 2048", "input": 5000,
         "ctx": {"le": 2048}}));
-    // The detail entry's own key order is pydantic's.
+    // The detail entry's own key order is the contract.
     assert_eq!(keys(&v["detail"][0]), ["type", "loc", "msg", "input", "ctx"]);
 }
 
@@ -157,7 +158,7 @@ async fn defaults_apply_when_fields_are_omitted() {
     assert_eq!(v["max_tokens"], 100);
 }
 
-// ── the 422 semantics this task owns (Ruling 1) ─────────────────────────────
+// ── the shared 422 semantics ────────────────────────────────────────────────
 
 /// `Field(100, ge=1, le=2048)` is inclusive on both ends, so 1 and 2048 must reach the probe (and
 /// answer the 200 envelope against the dead default upstream) while 0 and 2049 are 422.
@@ -178,7 +179,7 @@ async fn max_tokens_bounds_are_inclusive() {
 }
 
 /// A wrong-typed field is NOT a syntax error: it gets its own rule, a `loc` naming the field, and
-/// the offending value echoed in `input`. Each shape below was captured from `:8501` first.
+/// the offending value echoed in `input`.
 #[tokio::test]
 async fn wrong_typed_field_is_a_field_error_not_json_invalid() {
     let (base, _h) = spawn_app().await;
@@ -187,10 +188,10 @@ async fn wrong_typed_field_is_a_field_error_not_json_invalid() {
     assert_eq!(v["detail"][0], json!({"type": "int_parsing", "loc": ["body", "max_tokens"],
         "msg": "Input should be a valid integer, unable to parse string as an integer",
         "input": "x"}));
-    // pydantic carries no `ctx` for a type error.
+    // A type error carries no `ctx`.
     assert!(v["detail"][0].get("ctx").is_none(), "{v}");
 
-    // The other rules pydantic distinguishes, all captured live: (body, rule, msg, echoed input).
+    // The other rules the validator distinguishes: (body, rule, msg, echoed input).
     let cases = [
         (json!({"max_tokens": 1.5}), "int_from_float",
             "Input should be a valid integer, got a number with a fractional part", json!(1.5)),
@@ -207,8 +208,8 @@ async fn wrong_typed_field_is_a_field_error_not_json_invalid() {
     }
 }
 
-/// Several bad fields answer one entry per field, in pydantic's declaration order
-/// (`model`, `prompt`, `max_tokens`, `base_url` at main.py:43-47) — measured live.
+/// Several bad fields answer one entry per field, in declaration order
+/// (`model`, `prompt`, `max_tokens`, `base_url`).
 #[tokio::test]
 async fn several_bad_fields_report_in_declaration_order() {
     let (base, _h) = spawn_app().await;
@@ -225,11 +226,11 @@ async fn several_bad_fields_report_in_declaration_order() {
     assert_eq!(detail[2]["type"], "string_type");
 }
 
-/// pydantic checks types and `Field(ge/le)` bounds in ONE pass and answers one 422 carrying
-/// every offending field — live on `:8501`, `{"model":5,"max_tokens":5000}` returns
-/// `string_type` for `model` then `less_than_equal` for `max_tokens`. A post-deserialization
-/// `validate()` could only report the first, so this pins the aggregated shape end to end. The
-/// constraint entry echoes the raw input: a numeric string stays a string.
+/// Types and `Field(ge/le)` bounds are checked in ONE pass, answering one 422 carrying every
+/// offending field — `{"model":5,"max_tokens":5000}` returns `string_type` for `model` then
+/// `less_than_equal` for `max_tokens`. A post-deserialization `validate()` could only report the
+/// first, so this pins the aggregated shape end to end. The constraint entry echoes the raw
+/// input: a numeric string stays a string.
 #[tokio::test]
 async fn type_and_range_errors_aggregate_in_one_422() {
     let (base, _h) = spawn_app().await;
@@ -248,8 +249,8 @@ async fn type_and_range_errors_aggregate_in_one_422() {
     assert_eq!(v["detail"][0]["input"], "5000", "the raw string, not the coerced int");
 }
 
-/// A JSON syntax error is `json_invalid` with the character offset in `loc[1]` — the value the
-/// old `from_json_rejection` shim hard-coded to 0. Every offset here was read off `:8501`.
+/// A JSON syntax error is `json_invalid` with the character offset in `loc[1]` — a value that
+/// must be computed, not hard-coded to 0.
 #[tokio::test]
 async fn malformed_body_is_json_invalid_at_the_character_offset() {
     let (base, _h) = spawn_app().await;
@@ -263,14 +264,14 @@ async fn malformed_body_is_json_invalid_at_the_character_offset() {
         assert_eq!(v["detail"][0]["loc"], json!(["body", offset]), "{raw} -> {v}");
         assert_eq!(v["detail"][0]["msg"], "JSON decode error");
         assert_eq!(v["detail"][0]["input"], json!({}));
-        // The prose inside ctx.error is the JSON parser's own (CPython `json` vs `serde_json`)
-        // and is deliberately not reproduced, but the key itself must be there.
+        // The prose inside ctx.error is the JSON parser's own; only the key is contractually
+        // required.
         assert!(v["detail"][0]["ctx"]["error"].is_string(), "{v}");
     }
 }
 
 /// A body that is valid JSON but not an object never reaches the model: `model_attributes_type`
-/// on `["body"]`, echoing the whole value (all three captured live).
+/// on `["body"]`, echoing the whole value.
 #[tokio::test]
 async fn non_object_body_is_model_attributes_type() {
     let (base, _h) = spawn_app().await;
@@ -301,21 +302,21 @@ async fn empty_and_null_bodies_are_missing_not_syntax() {
     }
 }
 
-/// Ruling 1 also covers `POST /api/profile`: `Optional[str]` rejects a non-string but accepts
-/// `null`, and its syntax errors carry the same offset rule (`{"name": "x",,}` -> 13, live).
+/// The same shared rules cover `POST /api/profile`: `Optional[str]` rejects a non-string but
+/// accepts `null`, and its syntax errors carry the same offset rule.
 #[tokio::test]
 async fn profile_body_validation_shares_the_test_endpoint_semantics() {
     let (base, _h) = spawn_app().await;
     let c = reqwest::Client::new();
 
-    // A non-string on an Optional[str] is `string_type`, echoing the value (live on :8501).
+    // A non-string on an Optional[str] is `string_type`, echoing the value.
     let r = c.post(format!("{base}/api/profile")).json(&json!({"name": 5})).send().await.unwrap();
     assert_eq!(r.status(), 422);
     let v: Value = r.json().await.unwrap();
     assert_eq!(v["detail"][0], json!({"type": "string_type", "loc": ["body", "name"],
         "msg": "Input should be a valid string", "input": 5}));
 
-    // The same json_invalid offset rule, on the other endpoint: `{"name": "x",,}` -> 13 live.
+    // The same json_invalid offset rule, on the other endpoint: `{"name": "x",,}` -> 13.
     let r = c.post(format!("{base}/api/profile"))
         .header("Content-Type", "application/json").body("{\"name\": \"x\",,}")
         .send().await.unwrap();
@@ -339,8 +340,8 @@ async fn profile_body_validation_shares_the_test_endpoint_semantics() {
     }
 }
 
-/// A pydantic lax-mode value that validates must survive the type pass unchanged: `"20"` and
-/// `20.0` both reach the probe as 20 (Python accepts them — verified live against `:8501`).
+/// A lax-mode value that validates must survive the type pass unchanged: `"20"` and `20.0` both
+/// reach the probe as 20.
 #[tokio::test]
 async fn lax_numeric_coercions_are_accepted_not_rejected() {
     let (mock, _m) = spawn_mock().await;
@@ -356,9 +357,9 @@ async fn lax_numeric_coercions_are_accepted_not_rejected() {
 
 // ── probe behaviour ─────────────────────────────────────────────────────────
 
-/// Python only emits the result dict when the probe finished; a stream without an accepted
-/// `data: ` line leaves `ttft_ms` None, and `"ttft_ms": round(x, 1) if x else None` keeps the
-/// key with a null value. It must not be dropped.
+/// The result object is emitted whenever the probe finished; a stream without an accepted
+/// `data: ` line leaves `ttft_ms` None, and the key stays present with a null value. It must not
+/// be dropped.
 #[tokio::test]
 async fn ttft_ms_is_a_null_key_when_no_data_line_arrives() {
     let (up, _u) = spawn_upstream(120, false).await;
@@ -373,8 +374,8 @@ async fn ttft_ms_is_a_null_key_when_no_data_line_arrives() {
     assert_eq!(v["tokens"], 20);
 }
 
-/// The second Python call failing (stream fine, completion 400) is the other error prefix, with
-/// the body Python would have put after the status.
+/// The second call failing (stream fine, completion 400) is the other error prefix, with the
+/// upstream body carried after the status.
 #[tokio::test]
 async fn inference_failure_keeps_the_ttft_probe_alive() {
     let (up, _u) = spawn_inference_fails().await;
@@ -385,21 +386,22 @@ async fn inference_failure_keeps_the_ttft_probe_alive() {
     assert_eq!(keys(&v), ["error"]);
 }
 
-/// LM Studio is down, so the default base URL is a genuinely unreachable upstream: a connection
-/// failure is the mandated 200 `{"error": ...}`, never a plain-text 400 and never a 5xx.
+/// An unreachable upstream yields a connection failure: the mandated 200 `{"error": ...}`, never
+/// a plain-text 400 and never a 5xx. The dead port is explicit — the default endpoint can't be
+/// assumed down; a live LLM server there turns this test into a successful benchmark.
 #[tokio::test]
 async fn unreachable_upstream_is_a_200_error_envelope() {
     let (base, _h) = spawn_app().await;
-    let (status, v) = post_json(&base, json!({"base_url": ""})).await;
+    let (status, v) = post_json(&base, json!({"base_url": "http://127.0.0.1:9"})).await;
     assert_eq!(status, 200);
     let e = v["error"].as_str().unwrap();
     assert!(e.starts_with("TTFT probe failed: "), "{e}");
     assert_eq!(keys(&v), ["error"]);
 }
 
-/// Task 7 reads the history back out of SQLite, so a successful run has to be a `single` row
-/// carrying the same numbers the response reported — and a failed run must not be recorded,
-/// because Python only appends on the success path (main.py:141).
+/// The history endpoint reads the run back out of SQLite, so a successful run has to be a
+/// `single` row carrying the same numbers the response reported — and a failed run must not be
+/// recorded.
 #[tokio::test]
 async fn a_successful_run_is_persisted_for_the_history_endpoint() {
     let (mock, _m) = spawn_mock().await;

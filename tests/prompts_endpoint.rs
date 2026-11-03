@@ -94,7 +94,7 @@ async fn get_prompts_lists_three_defaults_and_a_categorised_pool() {
 
 #[tokio::test]
 async fn an_unreadable_database_answers_the_200_error_envelope_not_a_default_pool() {
-    // Same rule Task 4/7 pinned for profile and history: a store failure must not masquerade
+    // Same rule the profile and history endpoints follow: a store failure must not masquerade
     // as "the pool is just the built-in one" — the UI would hide a broken database.
     let (base, h) = support::spawn_app_on_db(lomora::store::Db::unreadable_for_tests()).await;
     let r = reqwest::get(format!("{base}/api/prompts")).await.unwrap();

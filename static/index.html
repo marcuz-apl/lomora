@@ -4,12 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Lomora - LLM Monitor</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%235b8cff'/><stop offset='1' stop-color='%237c5cff'/></linearGradient></defs><rect width='64' height='64' rx='14' fill='url(%23g)'/><text x='32' y='46' font-family='Arial,sans-serif' font-size='40' font-weight='700' fill='%23fff' text-anchor='middle'>L</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <style>
   :root {
+    color-scheme: dark;
     --bg: #0b0e14;
     --bg-2: #11151f;
     --card: rgba(22,26,38,0.72);
@@ -23,13 +25,37 @@
     --text: #e6ecf5;
     --muted: #8a93a6;
     --shadow: 0 10px 30px rgba(0,0,0,0.35);
+    --input-bg: rgba(10,13,20,0.6);
+    --row-border: rgba(255,255,255,0.04);
+    --badge-bg: rgba(255,255,255,0.05);
+    --grid: rgba(255,255,255,0.04);
+    --tick: #8a93a6;
+    --glow-1: rgba(91,140,255,0.18);
+    --glow-2: rgba(124,92,255,0.14);
+  }
+  body.light {
+    color-scheme: light;
+    --bg: #eef1f6;
+    --card: rgba(255,255,255,0.86);
+    --card-solid: #ffffff;
+    --border: rgba(15,23,42,0.10);
+    --text: #1a2233;
+    --muted: #5c6575;
+    --shadow: 0 10px 30px rgba(15,23,42,0.10);
+    --input-bg: #ffffff;
+    --row-border: rgba(15,23,42,0.07);
+    --badge-bg: rgba(15,23,42,0.05);
+    --grid: rgba(15,23,42,0.09);
+    --tick: #4a5568;
+    --glow-1: rgba(91,140,255,0.12);
+    --glow-2: rgba(124,92,255,0.09);
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; }
   body {
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    background: radial-gradient(1200px 600px at 10% -10%, rgba(91,140,255,0.18), transparent 60%),
-                radial-gradient(900px 500px at 100% 0%, rgba(124,92,255,0.14), transparent 60%),
+    background: radial-gradient(1200px 600px at 10% -10%, var(--glow-1), transparent 60%),
+                radial-gradient(900px 500px at 100% 0%, var(--glow-2), transparent 60%),
                 var(--bg);
     color: var(--text);
     padding: 32px 24px 48px;
@@ -45,8 +71,10 @@
   .subtitle { color: var(--muted); font-size: 0.85rem; margin-top: 2px; }
   .status-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; background: var(--card); border: 1px solid var(--border); font-size: 0.8rem; color: var(--muted); }
   .status-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .status-box { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; border-radius: 10px; background: var(--input-bg); border: 1px solid var(--border); font-size: 0.85rem; color: var(--muted); }
+  .status-box .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); flex: none; }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; margin-bottom: 24px; }
   .card {
     background: var(--card);
     backdrop-filter: blur(12px);
@@ -78,7 +106,7 @@
   .field { display: flex; flex-direction: column; gap: 6px; }
   .field label { font-size: 0.75rem; color: var(--muted); font-weight: 500; }
   .controls input {
-    background: rgba(10,13,20,0.6);
+    background: var(--input-bg);
     border: 1px solid var(--border);
     border-radius: 10px;
     color: var(--text);
@@ -88,7 +116,6 @@
     transition: border-color 0.15s, box-shadow 0.15s;
   }
   .controls input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,140,255,0.18); }
-  .controls input.model { width: 220px; }
   .controls input.prompt { width: 340px; }
   .controls input.maxtok { width: 90px; }
 
@@ -109,31 +136,127 @@
   button:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(91,140,255,0.4); }
   button:active { transform: translateY(0); }
   button:disabled { opacity: 0.55; cursor: wait; transform: none; }
-  .spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: none; }
-  button.loading .spinner { display: inline-block; }
+  .spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: inline-block; visibility: hidden; }
+  button.loading .spinner { visibility: visible; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
   .err { color: var(--err); font-size: 0.85rem; margin-top: 12px; min-height: 1.2em; }
-  #status { font-size: 0.8rem; color: var(--muted); margin-left: auto; align-self: center; }
+  #status { font-size: 0.85rem; color: var(--muted); }
 
-  #chart-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; margin-bottom: 24px; height: 260px; box-shadow: var(--shadow); }
+  /* Provider keeps a fixed 200px; Base URL / API Key / Model each take one equal
+     share of the leftover row width (their fields carry inline flex:1). */
+  #provider { width: 200px; }
+
+  /* Action buttons: captions dead-center idle and while loading — the ::after reserves a
+     slot mirroring the spinner's, so nothing moves when the spinner appears. All four
+     action buttons share one fixed width; 174px clears the min-content of "Run Stress
+     Test" (~172px with its spinner slots at 10px side padding) so every button renders
+     the basis exactly. The three run buttons sit flush right of the params row; the 28px
+     margin before the first doubles the flex gap so selectors read apart from actions. */
+  #fetchBtn, #runBtn, #defaultsBtn, #stressBtn { justify-content: center; white-space: nowrap; }
+  #fetchBtn::after, #runBtn::after, #defaultsBtn::after, #stressBtn::after { content: ''; width: 14px; flex: none; }
+  #fetchBtn, #runBtn, #defaultsBtn, #stressBtn { flex: 0 0 174px; padding-left: 10px; padding-right: 10px; }
+  #runBtn { margin-left: 28px; }
+  /* Stress summary: 8 aggregate tiles in 2 rows of 4 so each is ~4x the old auto-fit
+     width (2 per row on phones). The fade class lets the 30s auto-hide dissolve the
+     tiles before their innerHTML is cleared — the clear is instant, so opacity gets
+     its 300ms transition first (matching STRESS_RESULTS_TTL_MS's 300ms settle below). */
+  #stressResults { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; font-size: 0.85rem; transition: opacity 0.3s; }
+  #stressResults.fading { opacity: 0; }
+  #stressResults:not(:empty) { margin-top: 14px; }
+
+  /* The 7-column history table keeps its natural width inside a scroll region, so phones
+     scroll sideways instead of crushing the columns. */
+  .table-scroll { overflow-x: auto; }
+  .table-scroll table { min-width: 640px; }
+
+  /* Two charting cards side by side 50:50 (stacked on mobile). #chart-wrap keeps the
+     trend card's look; its old bottom margin moved onto the shared grid. #model-wrap
+     mirrors it as a flex column so the title row + selector sit above a canvas that
+     fills the remaining 360px card height. */
+  /* minmax(0, 1fr), not bare 1fr: a 1fr track floors at the item's min-content, and a
+     Chart.js canvas's min-content is its current pixel width — so after any resize from a
+     wider viewport the tracks stuck at 630px and the page scrolled sideways. minmax(0, …)
+     plus min-width:0 down the .chart-body chain lets the cards shrink and Chart.js's own
+     resize observer then redraw the canvases at the smaller size. */
+  .chart-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; margin-bottom: 24px; }
+  #chart-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; height: 360px; box-shadow: var(--shadow); min-width: 0; }
+  #model-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; height: 360px; box-shadow: var(--shadow); display: flex; flex-direction: column; min-width: 0; }
+  .chart-body { flex: 1; min-height: 0; min-width: 0; position: relative; }
 
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   thead th { text-align: left; color: var(--muted); font-weight: 600; padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
-  tbody td { padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  tbody td { padding: 12px 14px; border-bottom: 1px solid var(--row-border); }
   tbody tr { transition: background 0.12s; }
   tbody tr:hover { background: rgba(91,140,255,0.06); }
   tbody tr:last-child td { border-bottom: none; }
+  /* The per-row delete control: a quiet ghost button that darkens on hover. */
+  td.del { text-align: center; width: 44px; }
+  td.del button { background: transparent; border: 1px solid var(--border); color: var(--muted);
+                  border-radius: 8px; padding: 2px 9px; cursor: pointer; font-size: 0.8rem;
+                  font-family: inherit; line-height: 1.4; transition: color 0.12s, border-color 0.12s; }
+  td.del button:hover { color: var(--text); border-color: var(--muted); }
   .empty { text-align: center; color: var(--muted); padding: 32px 14px; font-size: 0.85rem; }
 
   .section-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
-  .section-title .badge { font-size: 0.7rem; color: var(--muted); font-weight: 500; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,0.05); }
+  .section-title .badge { font-size: 0.7rem; color: var(--muted); font-weight: 500; padding: 2px 8px; border-radius: 6px; background: var(--badge-bg); }
 
-  footer { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 32px; }
+  /* Footer: About sits in the left corner, the brand stays centred, and the two social
+     links sit in the right corner. Equal 1fr side columns keep the brand optically centred
+     regardless of how wide the link is or how many icons there are. */
+  footer { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; color: var(--muted); font-size: 0.75rem; margin-top: 32px; padding-bottom: 28px; }
+  footer .about-link { justify-self: start; }
+  .footer-brand { text-align: center; }
+  .footer-social { justify-self: end; display: inline-flex; align-items: center; gap: 12px; }
+  .footer-social a { display: inline-flex; color: var(--muted); text-decoration: none; transition: color 0.12s, transform 0.12s; }
+  .footer-social a:hover { color: var(--text); transform: translateY(-1px); }
+  .footer-social svg { width: 16px; height: 16px; display: block; }
+
+  /* About dialog, opened from the footer link. Native <dialog> supplies the backdrop,
+     Esc handling, focus trap and focus restoration; theme variables keep it native to
+     light/dark. A click whose target is the dialog itself is a ::backdrop click. */
+  .about-link { background: none; border: 0; padding: 0; box-shadow: none; border-radius: 0; color: var(--muted); font-size: inherit; font-weight: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
+  .about-link:hover { transform: none; box-shadow: none; color: var(--text); }
+  .about-link:active { transform: none; }
+  #aboutDialog { margin: auto; border: 1px solid var(--border); border-radius: 16px; background: var(--card); color: var(--text); box-shadow: var(--shadow); padding: 0; width: min(440px, calc(100vw - 32px)); }
+  #aboutDialog::backdrop { background: rgba(8, 12, 24, 0.55); backdrop-filter: blur(2px); }
+  .about-body { padding: 20px 22px 18px; }
+  .about-head { display: flex; align-items: flex-start; gap: 12px; }
+  .about-logo { width: 38px; height: 38px; flex: none; border-radius: 10px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); display: grid; place-items: center; font-weight: 700; color: #fff; box-shadow: 0 6px 18px rgba(91,140,255,0.35); }
+  .about-head h2 { font-size: 1.05rem; margin: 0; }
+  .about-tag { color: var(--muted); font-size: 0.8rem; }
+  .about-close { margin-left: auto; background: transparent; border: 0; box-shadow: none; color: var(--muted); font-size: 0.95rem; line-height: 1; padding: 6px 8px; border-radius: 8px; }
+  .about-close:hover { transform: none; box-shadow: none; color: var(--text); }
+  .about-body p { color: var(--muted); font-size: 0.85rem; line-height: 1.55; margin: 14px 0 0; }
+  .about-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 0.78rem; color: var(--muted); }
+  .about-meta a { color: var(--accent); text-decoration: none; }
+  .about-meta a:hover { text-decoration: underline; }
 
   @media (max-width: 640px) {
     body { padding: 20px 14px 32px; }
-    .controls input.model, .controls input.prompt { width: 100%; }
+    /* Every card field stacks full-width, and form controls go to 16px so iOS Safari does
+       not auto-zoom the page when an input takes focus. */
+    .controls { flex-direction: column; align-items: stretch; }
+    .controls input.model, .controls input.prompt, .controls input.maxtok { width: 100%; }
+    .controls input, .controls select { font-size: 16px; }
+    /* The fixed desktop width of the Provider select gives way to full-width stacking. */
+    #provider { width: 100%; }
+    /* The four action buttons stack full-width; flex:0 0 auto keeps the 174px
+       basis from the desktop rule from turning into a basis for height. */
+    #runBtn, #defaultsBtn, #stressBtn, #fetchBtn { flex: 0 0 auto; width: 100%; }
+    #runBtn { margin-left: 0; }
+    /* The two charting cards stack instead of squeezing side by side. */
+    .chart-grid { grid-template-columns: minmax(0, 1fr); }
+    /* Stress tiles go 2 per row: four ~80px columns would crush the values on a phone. */
+    #stressResults { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .section-title { flex-wrap: wrap; }
+    #profileDetails { grid-template-columns: repeat(2, 1fr); }
+    /* The brand gets its own row so the long credit line is not squeezed between the About
+       link and the two icons; those keep their corners on the second row. */
+    footer { grid-template-columns: 1fr 1fr; row-gap: 10px; }
+    .footer-brand { grid-column: 1 / -1; grid-row: 1; }
+    footer .about-link { grid-column: 1; grid-row: 2; }
+    .footer-social { grid-column: 2; grid-row: 2; }
   }
 </style>
 </head>
@@ -145,10 +268,10 @@
     <div class="logo">L</div>
     <div>
       <h1>Lomora</h1>
-      <div class="subtitle">Local LLM performance monitor</div>
+      <div class="subtitle">We gauge models</div>
     </div>
   </div>
-  <div class="status-pill"><span class="dot"></span><span id="status">Ready</span></div>
+  <button id="themeBtn" onclick="cycleTheme()" aria-label="Toggle color theme" style="width:38px;height:38px;padding:0;justify-content:center;border-radius:999px;background:var(--card);border:1px solid var(--border);box-shadow:none;color:var(--text);"></button>
 </header>
 
 <div class="grid">
@@ -163,67 +286,118 @@
 <div class="panel">
   <div class="section-title">Run benchmark <span class="badge">POST /api/test</span></div>
   <div class="controls">
-<div class="field"><label>Provider</label>
-      <select id="provider" onchange="onProviderChange()" style="background:rgba(10,13,20,0.6);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:10px 14px;font-size:.9rem;font-family:inherit;">
+    <div class="field"><label>Provider</label>
+      <select id="provider" onchange="onProviderChange()" style="background:var(--input-bg);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:10px 14px;font-size:.9rem;font-family:inherit;">
         <option value="lmstudio">LM Studio (1234)</option>
         <option value="ollama">Ollama (11434)</option>
+        <option value="moderado">Moderado (4788)</option>
         <option value="custom">Custom</option>
       </select>
     </div>
-    <div class="field"><label>Base URL</label><input class="model" id="baseUrl" value="http://localhost:1234"></div>
-    <div class="field"><label>Model</label><input class="model" id="model" value="local-model" list="models"></div>
+    <div class="field" style="flex:1;"><label>Base URL</label><input class="model" id="baseUrl" style="width:100%;" value="http://localhost:1234"></div>
+    <div class="field" style="flex:1;"><label>API Key</label><input class="model" id="apiKey" style="width:100%;" type="password" placeholder="mrd_… (optional)" autocomplete="off" spellcheck="false"></div>
+    <div class="field" style="flex:1;"><label>Model</label><input class="model" id="model" style="width:100%;" value="local-model" list="models"></div>
     <datalist id="models"></datalist>
-    <div class="field"><label>Prompt</label><input class="prompt" id="prompt" value="Count from 1 to 20, one number per line."></div>
-    <div class="field" style="min-width:340px;"><label>Question pool</label>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-        <select id="promptPool" onchange="pickPrompt()" style="background:rgba(10,13,20,0.6);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:10px 14px;font-size:.9rem;font-family:inherit;flex:1;min-width:200px;">
-          <option value="">-- pick a question --</option>
-        </select>
-        <button id="defaultsBtn" onclick="runDefaults()" style="padding:10px 14px;"><span class="spinner"></span><span class="btn-label">Run 3 defaults</span></button>
-        <button id="fetchBtn" onclick="fetchPrompts()" style="padding:10px 14px;"><span class="spinner"></span><span class="btn-label">Fetch more</span></button>
-      </div>
-      <div class="err" id="poolStatus" style="margin-top:6px;"></div>
-    </div>
-    <div class="field"><label>Max tokens</label><input class="maxtok" id="maxtok" type="number" value="100" min="1" max="2048"></div>
-    <button id="runBtn" onclick="runTest()"><span class="spinner"></span><span class="btn-label">Run Test</span></button>
   </div>
-  <div class="err" id="err"></div>
-</div>
-
-<div id="chart-wrap"><canvas id="chart"></canvas></div>
-
-<div class="panel">
-  <div class="section-title">History <span class="badge" id="histCount">0 runs</span></div>
-  <table>
-    <thead><tr><th>Time</th><th>Model</th><th>Max tokens</th><th>TTFT (ms)</th><th>Total (s)</th><th>Tokens</th><th>tok/s</th></tr></thead>
-    <tbody id="tbody"><tr><td colspan="7" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr></tbody>
-  </table>
-</div>
-
-<div class="panel" id="stressPanel">
-  <div class="section-title">Stress test <span class="badge">POST /api/stress</span></div>
-  <div class="controls">
-    <div class="field"><label>Concurrency</label><input class="maxtok" id="stressConc" type="number" value="4" min="1" max="32"></div>
-    <div class="field"><label>Requests</label><input class="maxtok" id="stressReqs" type="number" value="20" min="1" max="500"></div>
-    <div class="field"><label>Max tokens</label><input class="maxtok" id="stressMaxtok" type="number" value="64" min="1" max="2048"></div>
+  <div class="controls" style="margin-top:14px;">
+    <div class="field" style="flex:1;"><label>Max tokens</label><input class="maxtok" id="maxtok" type="number" value="100" min="1" max="2048" style="width:100%;"></div>
+    <div class="field" style="flex:1;"><label>Concurrency (stress)</label><input class="maxtok" id="stressConc" type="number" value="4" min="1" max="32" style="width:100%;"></div>
+    <div class="field" style="flex:1;"><label>Requests (stress)</label><input class="maxtok" id="stressReqs" type="number" value="20" min="1" max="500" style="width:100%;"></div>
+    <div class="field" style="flex:1;"><label>Max tokens (stress)</label><input class="maxtok" id="stressMaxtok" type="number" value="100" min="1" max="2048" style="width:100%;"></div>
+    <button id="runBtn" onclick="runTest()"><span class="spinner"></span><span class="btn-label">Run Test</span></button>
+    <button id="defaultsBtn" onclick="runDefaults()"><span class="spinner"></span><span class="btn-label">Run 3 defaults</span></button>
     <button id="stressBtn" onclick="runStress()"><span class="spinner"></span><span class="btn-label">Run Stress Test</span></button>
   </div>
   <div class="err" id="stressErr"></div>
-  <div id="stressResults" style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;font-size:.85rem;"></div>
+  <div id="stressResults"></div>
+
+  <div class="controls" style="margin-top:16px;">
+    <div class="field" style="flex:1 1 100%;"><label>Prompt</label><input class="prompt" id="prompt" style="width:100%;" value="Count from 1 to 20, one number per line."></div>
+    <div class="field" style="flex:1;"><label>Question pool</label>
+      <select id="promptPool" onchange="pickPrompt()" style="background:var(--input-bg);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:10px 14px;font-size:.9rem;font-family:inherit;width:100%;">
+        <option value="">-- pick a question --</option>
+      </select>
+      <div class="err" id="poolStatus" style="margin-top:6px;"></div>
+    </div>
+    <button id="fetchBtn" onclick="fetchPrompts()" style="align-self:center;"><span class="spinner"></span><span class="btn-label">Fetch more</span></button>
+  </div>
+  <div class="err" id="err"></div>
+  <div class="status-box"><span class="dot"></span><span id="status">Ready — pick a question or type a prompt, then Run Test</span></div>
+</div>
+
+<div class="chart-grid">
+  <div id="chart-wrap"><canvas id="chart"></canvas></div>
+  <div id="model-wrap">
+    <div class="section-title" style="margin-bottom:4px;">Model comparison <span class="badge">mean of recent 60</span>
+      <select id="metricSel" onchange="refreshModelChart()" style="margin-left:auto;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:6px 10px;font-size:.85rem;font-family:inherit;">
+        <option value="tps">TOK/S</option>
+        <option value="ttft">TTFT (ms)</option>
+      </select>
+    </div>
+    <div class="chart-body"><canvas id="modelChart"></canvas></div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="section-title">History <span class="badge" id="histCount">0 runs</span>
+    <span style="margin-left:auto;display:flex;gap:10px;align-items:center;">
+      <button id="histPrev" onclick="histGo(-1)" style="padding:8px 14px;">&lt;- Prev 10</button>
+      <span id="histPageInfo" style="font-size:.8rem;color:var(--muted);"></span>
+      <button id="histNext" onclick="histGo(1)" style="padding:8px 14px;">Next -&gt;</button>
+    </span>
+  </div>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th>Time</th><th>Model</th><th>Max tokens</th><th>TTFT (ms)</th><th>Total (s)</th><th>Tokens</th><th>tok/s</th><th></th></tr></thead>
+      <tbody id="tbody"><tr><td colspan="8" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr></tbody>
+    </table>
+  </div>
 </div>
 
 <div class="panel" id="profilePanel">
-  <div class="section-title">System profile <span class="badge">linked to benchmark results</span></div>
-  <div class="controls" style="align-items:start;">
-    <div class="field"><label>Profile name</label><input class="model" id="profileName" value="My workstation"></div>
-    <div class="field" style="flex:1;min-width:260px;"><label>Notes</label><input class="prompt" id="profileNotes" value="" placeholder="e.g. RTX 4090, 64GB RAM, i9-13900K"></div>
-    <button onclick="saveProfile()">Save profile</button>
+  <div class="section-title">System profile <span class="badge">linked to benchmark results</span>
+    <button id="saveBtn" onclick="saveProfile()" style="margin-left:auto;padding:8px 18px;">Save profile</button>
   </div>
-  <div id="profileDetails" style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;font-size:.85rem;color:var(--muted);"></div>
+  <div class="controls">
+    <div class="field" style="flex:1 1 240px;"><label>Profile name</label><input class="model" id="profileName" style="width:100%;" value="My workstation"></div>
+    <div class="field" style="flex:2 1 320px;"><label>Notes</label><input class="prompt" id="profileNotes" style="width:100%;" value="" placeholder="e.g. RTX 4090, 64GB RAM, i9-13900K"></div>
+  </div>
+  <div id="profileDetails" style="margin-top:16px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;font-size:.85rem;color:var(--muted);"></div>
 </div>
 
-<footer>Lomora - Local LLM Rating Toolbox</footer>
+<footer>
+  <button type="button" class="about-link" onclick="openAbout()">About</button>
+  <span class="footer-brand"><span id="ftrYear"></span> Lomora - Local Model Rating Toolbox by Alfazen Inc.</span>
+  <div class="footer-social">
+    <a href="https://alfazen.org" target="_blank" rel="noopener noreferrer" aria-label="Alfazen website (alfazen.org)" title="alfazen.org">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>
+    </a>
+    <a href="https://linkedin.com/in/marcuszou" target="_blank" rel="noopener noreferrer" aria-label="LinkedIn profile of Marcus Zou" title="LinkedIn">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4.98 3.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5zM3 9h4v12H3zM9 9h3.8v1.7h.05c.53-1 1.83-2.05 3.77-2.05 4.03 0 4.78 2.65 4.78 6.1V21h-4v-5.5c0-1.31-.02-3-1.83-3-1.83 0-2.11 1.43-2.11 2.9V21H9z"/></svg>
+    </a>
+  </div>
+</footer>
 </div>
+
+<dialog id="aboutDialog" aria-labelledby="aboutTitle">
+  <div class="about-body">
+    <div class="about-head">
+      <div class="about-logo">L</div>
+      <div>
+        <h2 id="aboutTitle">Lomora</h2>
+        <div class="about-tag">Local LLM performance monitor</div>
+      </div>
+      <button type="button" class="about-close" aria-label="Close the About dialog" onclick="closeAbout()">&#10005;</button>
+    </div>
+    <p>A web dashboard for benchmarking and monitoring local LLM servers — LM Studio, Ollama, Moderado Gateway, or any OpenAI-compatible endpoint. Run single benchmarks, fan out stress tests, and page through a dated run history that survives restarts.</p>
+    <p>Axum and SQLite under the hood, with this dashboard embedded in a single binary.</p>
+    <div class="about-meta">
+      <span>Version 0.1.0</span>
+      <span>MIT License</span>
+      <a href="https://github.com/marcuz-apl/lomora.git" target="_blank" rel="noopener noreferrer">GitHub repository</a>
+    </div>
+  </div>
+</dialog>
 
 <script>
 const chart = new Chart(document.getElementById('chart'), {
@@ -237,11 +411,65 @@ const chart = new Chart(document.getElementById('chart'), {
     responsive: true, maintainAspectRatio: false,
     plugins: { legend: { display: false } },
     scales: {
-      x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8a93a6', font: { size: 10 } } },
-      y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8a93a6', font: { size: 10 } } }
+      x: { grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8a93a6', font: { size: 10 } },
+           title: { display: true, text: 'Run # (recent 60, oldest → newest)', color: '#8a93a6', font: { size: 11 } } },
+      y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8a93a6', font: { size: 10 } },
+           title: { display: true, text: 'Throughput (tok/s)', color: '#8a93a6', font: { size: 11 } } }
     }
   }
 });
+
+// ── Model comparison histogram ─────────────────────────────────────────────────
+// Second charting card: mean tok/s (or mean TTFT over the runs that report one —
+// stress rows carry ttft_ms: null and are skipped for TTFT) per model name, over
+// the same recent-60 window the trend card plots. Bars sort by value, descending.
+let lastHistory = [];
+const modelChart = new Chart(document.getElementById('modelChart'), {
+  type: 'bar',
+  data: { labels: [], datasets: [{
+    label: 'tok/s', data: [], backgroundColor: 'rgba(91,140,255,0.55)',
+    borderColor: '#5b8cff', borderWidth: 1, borderRadius: 6, maxBarThickness: 64
+  }]},
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { grid: { display: false }, ticks: { color: '#8a93a6', font: { size: 10 }, autoSkip: false, maxRotation: 45 },
+           title: { display: true, text: 'Model', color: '#8a93a6', font: { size: 11 } } },
+      y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.04)' }, ticks: { color: '#8a93a6', font: { size: 10 } },
+           title: { display: true, text: 'Throughput (tok/s) — mean per model', color: '#8a93a6', font: { size: 11 } } }
+    }
+  }
+});
+
+// Pure aggregation so it can be checked against the raw history independently:
+// returns [{model, value, runs}] sorted by value descending.
+function aggByModel(history, metric){
+  const acc = new Map();
+  for (const r of history) {
+    const v = metric === 'ttft' ? r.ttft_ms : r.tok_per_s;
+    if (v === null || v === undefined) continue;
+    const a = acc.get(r.model) || { sum: 0, n: 0 };
+    a.sum += v; a.n += 1;
+    acc.set(r.model, a);
+  }
+  return [...acc.entries()]
+    .map(([model, a]) => ({ model, value: a.sum / a.n, runs: a.n }))
+    .sort((x, y) => y.value - x.value);
+}
+
+function refreshModelChart(){
+  const metric = document.getElementById('metricSel').value;
+  const rows = aggByModel(lastHistory, metric);
+  const ttft = metric === 'ttft';
+  modelChart.data.labels = rows.map(r => r.model);
+  modelChart.data.datasets[0].data = rows.map(r => +r.value.toFixed(1));
+  modelChart.data.datasets[0].label = ttft ? 'TTFT (ms)' : 'tok/s';
+  modelChart.options.scales.y.title.text = ttft
+    ? 'TTFT (ms) — mean per model'
+    : 'Throughput (tok/s) — mean per model';
+  modelChart.update();
+}
 
 async function loadHardware(){
   try {
@@ -265,8 +493,25 @@ async function loadHardware(){
 
 function addRow(r){
   const tr = document.createElement('tr');
-  tr.innerHTML = `<td>${r.timestamp}</td><td>${r.model}</td><td>${r.max_tokens}</td><td>${r.ttft_ms ?? '-'}</td><td>${r.total_s}</td><td>${r.tokens}</td><td><strong>${r.tok_per_s}</strong></td>`;
+  tr.innerHTML = `<td>${r.timestamp}</td><td>${r.model}</td><td>${r.max_tokens}</td><td>${r.ttft_ms ?? '-'}</td><td>${r.total_s}</td><td>${r.tokens}</td><td><strong>${r.tok_per_s}</strong></td>` +
+    `<td class="del"><button title="Delete this run" onclick="deleteRun(${r.id})">&#10005;</button></td>`;
   document.getElementById('tbody').prepend(tr);
+}
+
+// Deletes one history row by its database id. The confirm() guard is deliberate — the row is
+// gone for good (no undo) — and the answer's fresh `total` clamps the pager in case the
+// current page fell off the end. Failures surface in the run card's error line like the
+// other flows.
+async function deleteRun(id){
+  if (!confirm('Delete this run record? This cannot be undone.')) return;
+  try {
+    const d = await fetch(`/api/history/${id}`, {method:'DELETE'}).then(r=>r.json());
+    if (d.error){ document.getElementById('err').textContent = d.error; return; }
+    const pages = Math.max(1, Math.ceil((d.total ?? histTotal) / HIST_PAGE));
+    if (histPageNum >= pages) histPageNum = pages - 1;
+    await loadHistory(); await loadChart();
+    document.getElementById('status').textContent = d.deleted ? 'Run deleted' : 'Run not found (already deleted?)';
+  } catch(e){ document.getElementById('err').textContent = String(e); }
 }
 
 function refreshChart(history){
@@ -275,15 +520,45 @@ function refreshChart(history){
   chart.update();
 }
 
+const HIST_PAGE = 10;
+let histPageNum = 0, histTotal = 0;
+
+// The table shows one page of 10 rows at a time (?limit=&offset= windows over the dataset,
+// X-Total-Runs sizes the pager); the chart keeps drawing the recent 60-run trend regardless
+// of which page is open, so a short page never shrinks the trend line. A page arrives
+// oldest-first (the API contract), and addRow() prepends each row — so feeding the
+// array as-is renders newest-first, the fresh run staying on top; an extra reverse() here
+// used to flip the page a second time and sink every new run to the bottom.
 async function loadHistory(){
   try {
-    const h = await fetch('/api/history').then(r=>r.json());
+    const r = await fetch(`/api/history?limit=${HIST_PAGE}&offset=${histPageNum*HIST_PAGE}`);
+    const h = await r.json();
+    histTotal = Number(r.headers.get('x-total-runs')) || h.length;
+    const pages = Math.max(1, Math.ceil(histTotal / HIST_PAGE));
     const tbody = document.getElementById('tbody');
-    if (!h.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr>'; }
-    else { tbody.innerHTML = ''; h.slice().reverse().forEach(addRow); }
+    if (!h.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr>'; }
+    else { tbody.innerHTML = ''; h.forEach(addRow); }
+    document.getElementById('histCount').textContent = `${histTotal} run${histTotal===1?'':'s'}`;
+    document.getElementById('histPageInfo').textContent =
+      histTotal ? `${histPageNum*HIST_PAGE+1}–${Math.min((histPageNum+1)*HIST_PAGE, histTotal)} of ${histTotal}` : '';
+    document.getElementById('histPrev').disabled = histPageNum <= 0;
+    document.getElementById('histNext').disabled = histPageNum + 1 >= pages;
+  } catch(e){ console.error(e); }
+}
+
+function histGo(dir){
+  const pages = Math.max(1, Math.ceil(histTotal / HIST_PAGE));
+  histPageNum = Math.min(Math.max(histPageNum + dir, 0), pages - 1);
+  loadHistory();
+}
+
+async function loadChart(){
+  try {
+    const h = await fetch('/api/history').then(r=>r.json());
     refreshChart(h);
+    lastHistory = h;
+    refreshModelChart();
     if (h.length) document.getElementById('lasttps').textContent = h[h.length-1].tok_per_s;
-    document.getElementById('histCount').textContent = `${h.length} run${h.length===1?'':'s'}`;
   } catch(e){ console.error(e); }
 }
 
@@ -307,6 +582,11 @@ function onProviderChange(){
   const base = document.getElementById('baseUrl');
   if (p === 'lmstudio') base.value = 'http://localhost:1234';
   else if (p === 'ollama') base.value = 'http://localhost:11434';
+  else if (p === 'moderado') base.value = 'http://127.0.0.1:4788';
+  // The old provider's model name is stale the moment the base changes — reset it so
+  // loadModels() auto-fills the first model the new provider actually serves (or the
+  // placeholder stays if the provider is unreachable).
+  document.getElementById('model').value = 'local-model';
   loadModels();
 }
 
@@ -340,14 +620,23 @@ async function saveProfile(){
   } catch(e){ console.error(e); }
 }
 
+// The stress summary tiles dissolve 30s after a run; a re-run inside that window restarts
+// the timer instead of letting the old one wipe fresh results. The fade's inner 300ms
+// clear checks the class first, so a run started mid-dissolve keeps its new tiles.
+const STRESS_RESULTS_TTL_MS = 30000;
+let stressHideTimer = null;
+
 async function runStress(){
   const btn = document.getElementById('stressBtn');
   const err = document.getElementById('stressErr');
   const res = document.getElementById('stressResults');
   err.textContent = '';
+  clearTimeout(stressHideTimer); stressHideTimer = null;
+  res.classList.remove('fading');
   res.innerHTML = '';
   btn.disabled = true; btn.classList.add('loading');
-  document.getElementById('status').textContent = 'Stress testing...';
+  document.getElementById('status').textContent =
+    `Stress testing: ${document.getElementById('stressReqs').value} requests × ${document.getElementById('stressConc').value} concurrent on ${document.getElementById('model').value}…`;
   try {
     const body = {
       model: document.getElementById('model').value,
@@ -355,7 +644,8 @@ async function runStress(){
       max_tokens: parseInt(document.getElementById('stressMaxtok').value,10),
       base_url: document.getElementById('baseUrl').value,
       concurrency: parseInt(document.getElementById('stressConc').value,10),
-      requests: parseInt(document.getElementById('stressReqs').value,10)
+      requests: parseInt(document.getElementById('stressReqs').value,10),
+      api_key: document.getElementById('apiKey').value.trim() || undefined
     };
     const r = await fetch('/api/stress', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     const data = await r.json();
@@ -370,9 +660,24 @@ async function runStress(){
       ['Agg tok/s', data.agg_tok_per_s],
       ['Total tokens', data.total_tokens],
     ];
-    res.innerHTML = rows.map(([k,v]) => `<div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:10px 12px;"><div style="color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">${k}</div><div style="font-size:1.1rem;font-weight:700;margin-top:4px;">${v}</div></div>`).join('');
-    await loadHistory();
-    document.getElementById('status').textContent = `Stress done: ${data.req_per_s} req/s`;
+    res.innerHTML = rows.map(([k,v]) => `<div style="background:var(--badge-bg);border:1px solid var(--border);border-radius:10px;padding:10px 12px;"><div style="color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;">${k}</div><div style="font-size:1.1rem;font-weight:700;margin-top:4px;">${v}</div></div>`).join('');
+    const doneMsg = `Stress done: ${data.success}/${data.requests} ok · ${data.req_per_s} req/s · ${data.agg_tok_per_s} tok/s aggregate`;
+    const statusEl = document.getElementById('status');
+    stressHideTimer = setTimeout(() => {
+      stressHideTimer = null;
+      res.classList.add('fading');
+      setTimeout(() => {
+        if (!res.classList.contains('fading')) return; // a new run took over mid-fade
+        res.innerHTML = '';
+        res.classList.remove('fading');
+        // Explain the vanishing tiles — but only while the box still shows this run's
+        // result; a benchmark or stress run started meanwhile owns the box now.
+        if (statusEl.textContent === doneMsg) statusEl.textContent =
+          'Stress summary hidden after 30 s — the run is saved in the history table and charts.';
+      }, 300);
+    }, STRESS_RESULTS_TTL_MS);
+    histPageNum = 0; await loadHistory(); await loadChart();
+    statusEl.textContent = doneMsg;
   } catch(e){
     err.textContent = String(e);
     document.getElementById('status').textContent = 'Error';
@@ -390,20 +695,21 @@ async function runTest(force){
   const status = document.getElementById('status');
   err.textContent='';
   btn.disabled=true; btn.classList.add('loading');
-  status.textContent='Running...';
+  status.textContent=`Benchmarking ${document.getElementById('model').value} (${document.getElementById('maxtok').value} tokens)…`;
   try {
     const body = {
       model: document.getElementById('model').value,
       prompt: document.getElementById('prompt').value,
       max_tokens: parseInt(document.getElementById('maxtok').value,10),
-      base_url: document.getElementById('baseUrl').value
+      base_url: document.getElementById('baseUrl').value,
+      api_key: document.getElementById('apiKey').value.trim() || undefined
     };
     const r = await fetch('/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const data = await r.json();
     if (data.error){ err.textContent = data.error; status.textContent='Failed'; return; }
-    await loadHistory();
+    histPageNum = 0; await loadHistory(); await loadChart();
     document.getElementById('lasttps').textContent = data.tok_per_s;
-    status.textContent = `Done: ${data.tok_per_s} tok/s`;
+    status.textContent = `Done: ${data.tok_per_s} tok/s · TTFT ${data.ttft_ms} ms · ${data.total_s} s total`;
   } catch(e){
     err.textContent = String(e);
     status.textContent='Error';
@@ -447,29 +753,38 @@ function pickPrompt(){
   }
 }
 
+// Fetching is an action with a result, so its outcome — count summary, envelope error or
+// exception — lands in the run card's status box like every other running-results message.
+// poolStatus stays reserved for pool diagnostics (loadPrompts failures, runDefaults
+// pre-flight checks) and is deliberately left untouched here.
 async function fetchPrompts(){
   const btn = document.getElementById('fetchBtn');
-  const st = document.getElementById('poolStatus');
-  st.textContent = '';
+  const status = document.getElementById('status');
+  status.textContent = 'Fetching questions…';
   btn.disabled = true; btn.classList.add('loading');
   try {
     const d = await fetch('/api/prompts/fetch', {method:'POST'}).then(r=>r.json());
-    if (d.error){ st.textContent = d.error; return; }
+    if (d.error){ status.textContent = d.error; return; }
     await loadPrompts();
     let msg = `Fetched ${d.added} questions`;
     if (d.failed && d.failed.length) msg += ` (${d.failed.map(f=>f.category).join(', ')} unavailable)`;
-    st.textContent = msg;
-  } catch(e){ st.textContent = String(e); }
+    status.textContent = msg;
+  } catch(e){ status.textContent = String(e); }
   finally { btn.disabled = false; btn.classList.remove('loading'); }
 }
 
 // Fire the three default questions back-to-back, each a full run and its own history row.
 // The prompt box is restored afterwards; Run Test is locked out while the queue drives it
 // (_queueRunning), since each runTest() call would otherwise re-enable it mid-sequence.
+// Pre-flight pool problems stay in the pool status (they are pool diagnostics), but the
+// queue's results — the finished summary and its own exceptions — belong in the run card's
+// status box, like every other running-results message. Writing the summary to the pool
+// status used to surface it above the status box instead.
 async function runDefaults(){
   const btn = document.getElementById('defaultsBtn');
   const runBtn = document.getElementById('runBtn');
   const st = document.getElementById('poolStatus');
+  const status = document.getElementById('status');
   if (window._queueRunning) return;
   st.textContent = '';
   let defaults = poolDefaults;
@@ -494,9 +809,9 @@ async function runDefaults(){
       await runTest(true);
       if (!document.getElementById('err').textContent) ok++;
     }
-    st.textContent = `Defaults finished: ${ok}/${defaults.length} runs recorded`;
+    status.textContent = `Defaults finished: ${ok}/${defaults.length} runs recorded`;
   } catch(e){
-    st.textContent = String(e);
+    status.textContent = String(e);
   } finally {
     document.getElementById('prompt').value = original;
     window._queueRunning = false;
@@ -506,8 +821,89 @@ async function runDefaults(){
   }
 }
 
+// ---- theme: auto (by local time) / light / dark, cycled by the header button ----
+const THEME_KEY = 'lomora-theme';
+const THEME_DAY_FROM = 7, THEME_DAY_TO = 19; // light 07:00–18:59 local; dark the rest of the day
+const THEME_ICONS = {
+  auto: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>',
+  light: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>',
+  dark: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>'
+};
+function storedTheme() { return localStorage.getItem(THEME_KEY); }
+function autoTheme() {
+  const h = new Date().getHours();
+  return (h >= THEME_DAY_FROM && h < THEME_DAY_TO) ? 'light' : 'dark';
+}
+function applyTheme() {
+  const mode = storedTheme() || 'auto';
+  document.body.classList.toggle('light', effectiveTheme() === 'light');
+  const btn = document.getElementById('themeBtn');
+  btn.innerHTML = THEME_ICONS[mode];
+  btn.title = mode === 'auto'
+    ? `Theme: auto — ${autoTheme()} now (light ${THEME_DAY_FROM}:00–${THEME_DAY_TO}:00)`
+    : `Theme: ${mode}`;
+  if (typeof chart !== 'undefined') refreshChartTheme();
+}
+function effectiveTheme() { return storedTheme() || autoTheme(); }
+function refreshChartTheme() {
+  const cs = getComputedStyle(document.body);
+  const grid = cs.getPropertyValue('--grid').trim(),
+        tick = cs.getPropertyValue('--tick').trim(),
+        line = cs.getPropertyValue('--accent').trim();
+  chart.options.scales.x.grid.color = grid;
+  chart.options.scales.y.grid.color = grid;
+  chart.options.scales.x.ticks.color = tick;
+  chart.options.scales.y.ticks.color = tick;
+  chart.options.scales.x.title.color = tick;
+  chart.options.scales.y.title.color = tick;
+  const ds = chart.data.datasets[0];
+  ds.borderColor = line;
+  ds.pointBackgroundColor = line;
+  chart.update('none');
+  // The model-comparison card recolors from the same CSS variables.
+  if (typeof modelChart !== 'undefined') {
+    const m = modelChart;
+    m.options.scales.y.grid.color = grid;
+    m.options.scales.x.ticks.color = tick;
+    m.options.scales.y.ticks.color = tick;
+    m.options.scales.x.title.color = tick;
+    m.options.scales.y.title.color = tick;
+    const mds = m.data.datasets[0];
+    mds.borderColor = line;
+    mds.backgroundColor = line + '8c'; // same accent at ~55% alpha (hex 8c)
+    m.update('none');
+  }
+}
+function cycleTheme() {
+  const next = { auto: 'light', light: 'dark', dark: 'auto' }[storedTheme() || 'auto'];
+  if (next === 'auto') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, next);
+  applyTheme();
+}
+setInterval(() => { if (!storedTheme()) applyTheme(); }, 60000);
+applyTheme();
+
+// ── API key ────────────────────────────────────────────────────────────────────
+// Remembered in localStorage (like the theme), sent only inside the benchmark request
+// bodies; the backend forwards it as `Authorization: Bearer <key>` and never stores it.
+const apiKeyEl = document.getElementById('apiKey');
+apiKeyEl.value = localStorage.getItem('lomora-apikey') || '';
+apiKeyEl.addEventListener('input', () => {
+  const v = apiKeyEl.value.trim();
+  if (v) localStorage.setItem('lomora-apikey', v); else localStorage.removeItem('lomora-apikey');
+});
+
+// Footer "About" link: native <dialog> handles Esc, the focus trap and focus return;
+// a click whose target is the dialog element itself is a ::backdrop click and closes it.
+function openAbout(){ document.getElementById('aboutDialog').showModal(); }
+function closeAbout(){ document.getElementById('aboutDialog').close(); }
+document.getElementById('aboutDialog').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) e.currentTarget.close();
+});
+
 loadHardware();
 loadHistory();
+loadChart();
+document.getElementById('ftrYear').textContent = new Date().getFullYear();
 loadModels();
 loadPrompts();
 loadProfile();

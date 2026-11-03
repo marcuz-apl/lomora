@@ -1,4 +1,4 @@
-//! `POST /api/stress` — the semaphore fan-out (main.py:197-267).
+//! `POST /api/stress` — the semaphore fan-out.
 //!
 //! Deterministic facts (keys, order, counts, error strings, 422 shapes) are asserted exactly;
 //! timings are only asserted structurally or as inequalities, because they are measured.
@@ -21,11 +21,11 @@ fn keys(v: &Value) -> Vec<String> {
     v.as_object().expect("the body must be a JSON object").keys().cloned().collect()
 }
 
-/// main.py:243-255's dict, in declaration order. The mocked upstream always answers
+/// The aggregate object's wire keys, in declaration order. The mocked upstream always answers
 /// `completion_tokens: 20` (src/mock.rs), so 12 calls total 240 — the count is deterministic
 /// even though the timings are not.
 #[tokio::test]
-async fn all_succeed_against_the_mock_and_keys_follow_python_order() {
+async fn all_succeed_against_the_mock_and_keys_follow_declaration_order() {
     let (mock, _m) = spawn_mock().await;
     let (base, _h) = fresh_app(&mock).await;
     let (status, v) = post_json(&base,
@@ -53,8 +53,8 @@ async fn all_succeed_against_the_mock_and_keys_follow_python_order() {
     assert!(v["avg_latency_s"].as_f64().unwrap() <= v["p95_latency_s"].as_f64().unwrap(), "{v}");
 }
 
-/// Stress has no error path in Python: every failure is counted and reported under HTTP 200,
-/// with the latency aggregate null (not 0) because nothing succeeded.
+/// Stress has no error path: every failure is counted and reported under HTTP 200, with the
+/// latency aggregate null (not 0) because nothing succeeded.
 #[tokio::test]
 async fn unreachable_upstream_returns_200_with_zero_success() {
     let (base, _h) = spawn_app().await;
@@ -90,7 +90,7 @@ async fn concurrency_cap_is_actually_enforced() {
 
 /// `Field(4, ge=1, le=32)` and `Field(20, ge=1, le=500)`, plus `max_tokens`' own bounds — all
 /// checked in the shared pass, so several bad fields answer several entries in declaration
-/// order. Each shape below was measured live against `:8501`.
+/// order.
 #[tokio::test]
 async fn validation_bounds_for_concurrency_requests_and_max_tokens() {
     let (base, _h) = spawn_app().await;
@@ -135,9 +135,9 @@ async fn stress_uses_the_shared_422_mapping() {
     assert_eq!(v["detail"][0]["loc"], json!(["body", 2]));
 }
 
-/// Python appends the synthetic history row after the gather *unconditionally* — a run where
-/// every call failed still lands in history. The row's model carries the concurrency suffix and
-/// `ttft_ms` is null (main.py:259-267).
+/// The synthetic history row is written after the gather *unconditionally* — a run where every
+/// call failed still lands in history. The row's model carries the concurrency suffix and
+/// `ttft_ms` is null.
 #[tokio::test]
 async fn a_stress_run_is_persisted_even_when_every_call_fails() {
     let db = lomora::store::Db::in_memory();

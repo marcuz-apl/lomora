@@ -2,12 +2,13 @@ mod support;
 use support::{fresh_app, fresh_app_on_db, spawn_app_on_db, spawn_mock};
 use serde_json::{json, Value};
 
-/// Python keeps a `deque(maxlen=60)` of dicts, appends newest, and `list(history)` hands the
-/// dashboard oldest-first (index.html reverses it back for display). Our rows live in SQLite,
-/// so `ORDER BY id DESC LIMIT 60` + `reverse()` must reproduce that order *and* the seven-key
-/// dict, in dict insertion order.
+/// The history API answers oldest-first and the dashboard reverses it back for display. The
+/// rows live in SQLite, so `ORDER BY id DESC LIMIT 60` + `reverse()` must reproduce that order
+/// *and* the seven-key wire object in insertion order. The API also carries an eighth key —
+/// `id`, first — because the dashboard's per-row delete needs the database identity;
+/// timestamp+model is ambiguous when one model is benchmarked twice in the same second.
 #[tokio::test]
-async fn rows_appear_oldest_first_with_seven_python_keys() {
+async fn rows_appear_oldest_first_with_eight_keys_id_first() {
     let (mock, _m) = spawn_mock().await;
     let (base, _h) = fresh_app(&mock).await;
     let c = reqwest::Client::new();
@@ -24,13 +25,51 @@ async fn rows_appear_oldest_first_with_seven_python_keys() {
     assert_eq!(arr[2]["model"], "m2");
     let obj = arr[0].as_object().expect("a history row must be a JSON object");
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-    assert_eq!(keys, ["timestamp", "model", "max_tokens", "ttft_ms", "total_s", "tokens", "tok_per_s"],
-               "exactly Python's seven keys, in dict insertion order");
-    assert!(obj["timestamp"].as_str().is_some_and(|s| s.len() == 8 && s.as_bytes()[2] == b':'),
-            "timestamp must be HH:MM:SS like Python's strftime, got {:?}", obj["timestamp"]);
+    assert_eq!(keys, ["id", "timestamp", "model", "max_tokens", "ttft_ms", "total_s", "tokens", "tok_per_s"],
+               "the seven wire keys plus the leading `id` the delete button needs");
+    let ids: Vec<i64> = arr.iter().map(|r| r["id"].as_i64().expect("id must be an integer")).collect();
+    assert_eq!(ids, vec![1, 2, 3], "insertion order ids, unique per row");
+    assert!(obj["timestamp"].as_str().is_some_and(
+                |s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").is_ok()),
+            "timestamp must be `%Y-%m-%d %H:%M:%S` — the dashboard prints it verbatim, got {:?}",
+            obj["timestamp"]);
 }
 
-/// The deque drops the *oldest* entry, so after 65 runs the five earliest are gone and the last
+/// Deleting one row removes exactly that row — by its database id, not by a (timestamp,
+/// model) guess — and the total that sizes the pager shrinks with it.
+#[tokio::test]
+async fn delete_removes_exactly_one_row_and_updates_the_total() {
+    let (mock, _m) = spawn_mock().await;
+    let (base, _h) = fresh_app(&mock).await;
+    let c = reqwest::Client::new();
+    for i in 0..3 {
+        c.post(format!("{base}/api/test"))
+            .json(&json!({"model": format!("m{i}"), "base_url": mock, "max_tokens": 8}))
+            .send().await.unwrap();
+    }
+    let r = c.delete(format!("{base}/api/history/2")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["deleted"], 1, "exactly one row goes away");
+    let resp = c.get(format!("{base}/api/history")).send().await.unwrap();
+    assert_eq!(resp.headers()["x-total-runs"], "2", "the pager total follows the delete");
+    let arr: Value = resp.json().await.unwrap();
+    let models: Vec<&str> = arr.as_array().unwrap().iter().map(|r| r["model"].as_str().unwrap()).collect();
+    assert_eq!(models, vec!["m0", "m2"], "the middle row (id 2) is the one that went");
+}
+
+/// An unknown id is not a runtime failure — nothing was deleted, say so and stay 200.
+#[tokio::test]
+async fn deleting_an_unknown_id_answers_deleted_zero() {
+    let (mock, _m) = spawn_mock().await;
+    let (base, _h) = fresh_app(&mock).await;
+    let r = reqwest::Client::new().delete(format!("{base}/api/history/999")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["deleted"], 0);
+}
+
+/// The window keeps the newest sixty: after 65 runs the five earliest are gone and the last
 /// sixty, still oldest-first, survive. Distinct model names make a wrong end of the window
 /// visible; an identical name would pass under either direction.
 #[tokio::test]
@@ -51,7 +90,7 @@ async fn history_is_capped_at_the_sixty_most_recent_oldest_first() {
 }
 
 /// A stress run is one synthetic row: the model carries the concurrency suffix, and ttft is
-/// null — Python never measures a single TTFT for a fan-out.
+/// null — no single TTFT is measured for a fan-out.
 #[tokio::test]
 async fn stress_rows_show_up_as_synthetic_entries() {
     let (mock, _m) = spawn_mock().await;
@@ -71,8 +110,7 @@ async fn stress_rows_show_up_as_synthetic_entries() {
 }
 
 /// The whole point of SQLite: a run outlives the process that recorded it. Two apps over one
-/// file, with the first fully stopped before the second opens it, is the restart under test —
-/// Python's `deque` starts empty again, spec deviation 1.
+/// file, with the first fully stopped before the second opens it, is the restart under test.
 #[tokio::test]
 async fn rows_survive_a_restart_on_a_shared_db_path() {
     let (mock, _m) = spawn_mock().await;

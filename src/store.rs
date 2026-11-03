@@ -1,6 +1,6 @@
 //! The only module in the crate that knows SQL. `routes.rs` and the benchmark tasks go
-//! through `Db`, which owns the schema, the `runs` rows Task 7 reads back oldest-first, and
-//! the `profile` singleton row that replaces Python's in-memory `system_profile` dict.
+//! through `Db`, which owns the schema, the `runs` rows the history API reads back
+//! oldest-first, and the `profile` singleton row.
 //! One `rusqlite::Connection` behind a `tokio::sync::Mutex` — no connection pool: every
 //! statement here is a single row write or a <60-row read, and the mutex is what keeps
 //! rusqlite's `!Sync`-by-design `Connection` off the async executor's hands.
@@ -14,6 +14,10 @@ use tokio::sync::Mutex;
 /// the field a shifted `params!` position landed in.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunRow {
+    /// The database identity, filled by reads (`runs_page`); `insert_run` ignores it and lets
+    /// AUTOINCREMENT assign it. Exposed to the dashboard as the leading `id` key so the
+    /// per-row delete can name exactly one row.
+    pub id: i64,
     pub kind: String, pub timestamp: String, pub model: String, pub max_tokens: i64,
     pub ttft_ms: Option<f64>, pub total_s: f64, pub tokens: i64, pub tok_per_s: f64,
     pub concurrency: Option<i64>, pub base_url: Option<String>,
@@ -23,12 +27,15 @@ pub struct RunRow {
 pub struct Profile { pub name: String, pub notes: String }
 
 impl RunRow {
-    /// A history entry carries exactly Python's seven keys, in dict insertion order (main.py's
-    /// `history.append({...})`): `kind`, `concurrency` and `base_url` are internal columns and
-    /// never reach the wire. A `None` `ttft_ms` stays a present null key — stress rows answer
-    /// `"ttft_ms": null`, not a missing field.
+    /// A history entry carries the seven wire keys in insertion order, led by `id` — the
+    /// database identity the dashboard's per-row delete targets; a (timestamp, model) pair
+    /// would be ambiguous when one model is benchmarked twice in the same second. `kind`,
+    /// `concurrency` and `base_url` are internal columns and never reach the wire. A `None`
+    /// `ttft_ms` stays a present null key — stress rows answer `"ttft_ms": null`, not a
+    /// missing field.
     pub fn to_history_json(&self) -> serde_json::Value {
         serde_json::json!({
+            "id": self.id,
             "timestamp": self.timestamp,
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -42,7 +49,7 @@ impl RunRow {
 
 impl Profile {
     /// The factory default: the same strings the `profile` table declares as column defaults
-    /// and `SCHEMA` seeds. Keep the three in sync — Python's `system_profile` starts here too.
+    /// and `SCHEMA` seeds. Keep the three in sync.
     fn factory() -> Profile { Profile { name: "My workstation".into(), notes: String::new() } }
 }
 
@@ -71,15 +78,33 @@ pub struct Db(Arc<Mutex<Connection>>);
 
 impl Db {
     pub fn open(path: &Path) -> anyhow::Result<Db> {
+        // The default path is `data/lomora.db`, and a fresh checkout has no `data/` folder.
+        // Creating the parent here (not at the call site) covers every file path, explicit
+        // `LOMORA_DB` values included; an empty parent (bare filename) needs nothing.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("creating the database directory {}: {e}",
+                                             parent.display()))?;
+        }
         let conn = Connection::open(path)?;
-        // Two handles over one file are a real configuration (Task 7's restart test builds two
+        // Two handles over one file are a real configuration (the restart test builds two
         // apps on one path; a second `cargo run` does too), and without a timeout SQLite answers
         // a lock conflict immediately with SQLITE_BUSY instead of waiting for the holder.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // WAL is deliberately not enabled: this is one connection in one process, so there is no
         // concurrent reader to benefit from it, and it would drop `-wal`/`-shm` sidecar files
-        // beside the user's `lomora.db` that Python's `sqlite3` path never creates.
+        // beside the user's `lomora.db` that nothing else in the project creates.
         conn.execute_batch(SCHEMA)?;
+        // One-time normalization for tables written before the history stamp widened from
+        // `%H:%M:%S` to `%Y-%m-%d %H:%M:%S`: the calendar date only ever lived in `created_at`
+        // (the RFC 3339 local stamp written beside every row), so legacy rows get that date
+        // prepended — the row's own time-of-day is kept verbatim, since `?3 is the caller's
+        // timestamp, not created_at`. `length(timestamp) = 8` keeps the pass idempotent
+        // (widened rows are 19 chars and never match), and the `length(created_at) >= 10`
+        // guard leaves a truncated `created_at` alone rather than corrupting the stamp. Runs
+        // on every open; on a fresh or already-widened table it is a no-op.
+        conn.execute("UPDATE runs SET timestamp = substr(created_at, 1, 10) || ' ' || timestamp \
+                      WHERE length(timestamp) = 8 AND length(created_at) >= 10", [])?;
         Ok(Db(Arc::new(Mutex::new(conn))))
     }
 
@@ -123,20 +148,40 @@ impl Db {
             params![kind, created, ts, model, mt, ttft, total, tok, tps, conc, base])?;
         Ok(())
     }
-    /// ORDER BY id DESC LIMIT n, then reversed: Python returns list(deque) oldest-first and
-    /// index.html reverses it itself. Spec 5.1.
+    /// ORDER BY id DESC LIMIT n, then reversed: the API answers oldest-first and keeps that
+    /// shape — the dashboard renders each page newest-first itself. Spec 5.1.
     pub async fn recent_runs(&self, limit: i64) -> anyhow::Result<Vec<RunRow>> {
+        Ok(self.runs_page(limit, 0).await?.0)
+    }
+
+    /// One page of the runs table for the dashboard's history pager, plus the unfiltered row
+    /// count so the UI can size its Prev/Next controls without a second endpoint. Same
+    /// ordering rule as `recent_runs`: newest-first SQL, reversed to oldest-first on the way
+    /// out, so page 0 is the newest `limit` rows presented oldest-first.
+    pub async fn runs_page(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<RunRow>, i64)> {
         let c = self.0.clone(); let g = c.lock().await;
-        let mut stmt = g.prepare("SELECT kind, timestamp, model, max_tokens, ttft_ms, total_s, \
-                   tokens, tok_per_s, concurrency, base_url FROM runs ORDER BY id DESC LIMIT ?1")?;
-        let rows = stmt.query_map(params![limit], |row| Ok(RunRow {
-            kind: row.get(0)?, timestamp: row.get(1)?, model: row.get(2)?, max_tokens: row.get(3)?,
-            ttft_ms: row.get(4)?, total_s: row.get(5)?, tokens: row.get(6)?, tok_per_s: row.get(7)?,
-            concurrency: row.get(8)?, base_url: row.get(9)?,
+        let total: i64 = g.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
+        let mut stmt = g.prepare("SELECT id, kind, timestamp, model, max_tokens, ttft_ms, total_s, \
+                   tokens, tok_per_s, concurrency, base_url FROM runs ORDER BY id DESC LIMIT ?1 OFFSET ?2")?;
+        let rows = stmt.query_map(params![limit, offset], |row| Ok(RunRow {
+            id: row.get(0)?, kind: row.get(1)?, timestamp: row.get(2)?, model: row.get(3)?,
+            max_tokens: row.get(4)?, ttft_ms: row.get(5)?, total_s: row.get(6)?,
+            tokens: row.get(7)?, tok_per_s: row.get(8)?, concurrency: row.get(9)?,
+            base_url: row.get(10)?,
         }))?;
         let mut out = rows.collect::<Result<Vec<_>, _>>()?;
         out.reverse();
-        Ok(out)
+        Ok((out, total))
+    }
+
+    /// Removes exactly one run by its database id and reports how many rows went — 0 for an
+    /// unknown id, which the handler answers as `{"deleted": 0}`, not a failure — together
+    /// with the fresh row count so the dashboard can clamp its pager without a second request.
+    pub async fn delete_run(&self, id: i64) -> anyhow::Result<(usize, i64)> {
+        let c = self.0.clone(); let g = c.lock().await;
+        let deleted = g.execute("DELETE FROM runs WHERE id = ?1", params![id])?;
+        let total: i64 = g.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
+        Ok((deleted, total))
     }
     /// The stored profile. Errors propagate: this used to end in `.unwrap_or(default)`, which
     /// fires for *any* `query_row` failure, so a transient `SQLITE_BUSY` made `GET /api/profile`
@@ -155,10 +200,10 @@ impl Db {
             Err(e) => Err(e.into()),
         }
     }
-    /// Absent (`None`) leaves the column untouched, present (including `""`) overwrites —
-    /// Python's semantics. A failed `UPDATE` propagates instead of being swallowed: the handler
+    /// Absent (`None`) leaves the column untouched, present (including `""`) overwrites — the
+    /// wire contract. A failed `UPDATE` propagates instead of being swallowed: the handler
     /// then answers the mandated 200 `{"error": …}` rather than reporting the stale row as a
-    /// saved profile, which `static/index.html:329` would print as "Profile saved".
+    /// saved profile, which the dashboard would print as "Profile saved".
     pub async fn set_profile(&self, name: Option<&str>, notes: Option<&str>)
         -> anyhow::Result<Profile>
     {
@@ -230,9 +275,8 @@ mod tests {
         fn drop(&mut self) { let _ = std::fs::remove_file(&self.path); }
     }
 
-    // The headline claim of the store: a saved profile outlives the process that saved it, which
-    // Python's in-memory `system_profile` dict cannot do. Until now only the manual restart in
-    // the task report proved it.
+    // The headline claim of the store: a saved profile outlives the process that saved it,
+    // something an in-memory profile can never promise.
     #[tokio::test]
     async fn saved_profile_survives_closing_and_reopening_the_same_file() {
         let f = TempDb::new("reopen");
@@ -271,20 +315,22 @@ mod tests {
     async fn runs_round_trip_oldest_first_with_every_column_in_its_field() {
         let f = TempDb::new("runs");
         let db = Db::open(&f.path).unwrap();
-        let first = RunRow { kind: "single".into(), timestamp: "09:41:03".into(),
+        // `id` is caller-meaningless on insert (AUTOINCREMENT owns it) and is filled by reads,
+        // so the expected rows below carry the ids a fresh table assigns: 1, 2, 3.
+        let first = RunRow { id: 1, kind: "single".into(), timestamp: "09:41:03".into(),
             model: "model-one".into(), max_tokens: 128, ttft_ms: Some(41.5), total_s: 1.25,
             tokens: 64, tok_per_s: 51.2, concurrency: Some(1),
             base_url: Some("http://127.0.0.1:1234".into()) };
         // The middle row keeps the two NULL-able columns as `None` — the shape of a single run
         // with no concurrency field and no base URL.
-        let second = RunRow { kind: "stress".into(), timestamp: "09:41:09".into(),
+        let second = RunRow { id: 2, kind: "stress".into(), timestamp: "09:41:09".into(),
             model: "model-two".into(), max_tokens: 256, ttft_ms: None, total_s: 2.5,
             tokens: 128, tok_per_s: 102.4, concurrency: None, base_url: None };
-        let third = RunRow { kind: "single".into(), timestamp: "09:41:15".into(),
+        let third = RunRow { id: 3, kind: "single".into(), timestamp: "09:41:15".into(),
             model: "model-three".into(), max_tokens: 512, ttft_ms: Some(404.75), total_s: 3.75,
             tokens: 192, tok_per_s: 204.8, concurrency: Some(4),
             base_url: Some("http://127.0.0.1:11434".into()) };
-        for r in [&first, &second, &third] { db.insert_run(r).await.unwrap(); }
+        for mut r in [first.clone(), second.clone(), third.clone()] { r.id = 0; db.insert_run(&r).await.unwrap(); }
 
         // `ORDER BY id DESC LIMIT 2` then `reverse()` == the last two rows, oldest-first.
         assert_eq!(db.recent_runs(2).await.unwrap(), vec![second.clone(), third.clone()],
@@ -311,10 +357,43 @@ mod tests {
         assert_eq!(db.recent_runs(5).await.unwrap(), Vec::<RunRow>::new());
     }
 
+    /// A table written before the history stamp widened from `HH:MM:SS` to
+    /// `YYYY-MM-DD HH:MM:SS` holds bare time-of-day rows — the date only ever lived in
+    /// `created_at`. The next `open()` must re-stamp those rows from their own `created_at`
+    /// so the dashboard's Time column is uniform; rows that already carry a date (19 chars)
+    /// never match and are left untouched.
+    #[tokio::test]
+    async fn a_time_only_stamp_is_dated_from_created_at_on_the_next_open() {
+        let f = TempDb::new("date-backfill");
+        {
+            let db = Db::open(&f.path).unwrap();
+            let row = RunRow { id: 0, kind: "single".into(), timestamp: "09:41:03".into(),
+                model: "legacy".into(), max_tokens: 64, ttft_ms: Some(41.5), total_s: 1.25,
+                tokens: 32, tok_per_s: 25.6, concurrency: None, base_url: None };
+            db.insert_run(&row).await.unwrap();
+        }
+        // Reopening the same file is a restart — the migration runs against the stored row.
+        let db = Db::open(&f.path).unwrap();
+        let rows = db.recent_runs(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let ts = rows[0].timestamp.clone();
+        assert_eq!(ts.len(), 19, "the stamp now carries the date: {ts}");
+        assert!(ts.ends_with(" 09:41:03"), "the original wall time survives: {ts}");
+        chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S")
+            .unwrap_or_else(|e| panic!("timestamp must be `%Y-%m-%d %H:%M:%S`, got {ts:?}: {e}"));
+        // The date must come from the row's own `created_at`, not from migration time: both
+        // strings start with the same local calendar date by construction.
+        let created_at = { let g = db.0.lock().await;
+            g.query_row("SELECT created_at FROM runs LIMIT 1", [],
+                |r| r.get::<_, String>(0)).unwrap() };
+        assert_eq!(&ts[..10], &created_at[..10],
+                   "date comes from the row's own created_at: {ts:?} vs {created_at:?}");
+    }
+
     #[tokio::test]
     async fn kind_check_rejects_an_unknown_run_kind() {
         let db = Db::in_memory();
-        let bad = RunRow { kind: "banana".into(), timestamp: "09:41:03".into(),
+        let bad = RunRow { id: 0, kind: "banana".into(), timestamp: "09:41:03".into(),
             model: "m".into(), max_tokens: 1, ttft_ms: None, total_s: 1.0, tokens: 1,
             tok_per_s: 1.0, concurrency: None, base_url: None };
         let err = db.insert_run(&bad).await.unwrap_err();
@@ -342,6 +421,22 @@ mod tests {
             g.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap()
         };
         assert_eq!(ms, 5000, "two handles over one file must wait, not fail instantly");
+    }
+
+    /// The default database now lives in a `data/` folder a fresh checkout does not have;
+    /// opening a path whose parent directory is missing must create it, not fail.
+    #[tokio::test]
+    async fn open_creates_missing_parent_directories() {
+        let root = std::env::temp_dir().join(format!("lomora-mkdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("nested").join("runs.db");
+        let db = Db::open(&path).unwrap();
+        let row = RunRow { id: 0, kind: "single".into(), timestamp: "09:41:03".into(),
+            model: "m".into(), max_tokens: 1, ttft_ms: None, total_s: 1.0, tokens: 1,
+            tok_per_s: 1.0, concurrency: None, base_url: None };
+        db.insert_run(&row).await.unwrap();
+        assert!(path.exists(), "the database file must exist under the new directory");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The two swallowing bugs at the store level: a failed write is `Err` rather than the stale

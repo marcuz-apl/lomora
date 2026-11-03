@@ -22,10 +22,9 @@ fn rel_path(path: Option<String>) -> Option<String> {
     Some(if trimmed.is_empty() { "index.html".to_string() } else { trimmed.to_string() })
 }
 
-/// Starlette's `FileResponse` appends `; charset=utf-8` to every `text/*` type (measured live:
-/// Python answers `text/html; charset=utf-8`), so the Rust side must too — without it the two
-/// servers disagree on the dashboard's own response header. Binary types (there are none today)
-/// pass through untouched.
+/// Every `text/*` response carries the `; charset=utf-8` suffix, so the dashboard's own
+/// content type is unambiguous on the wire. Binary types (there are none today) pass through
+/// untouched.
 fn content_type(rel: &str) -> String {
     let ctype = mime_guess::from_path(rel).first_or_text_plain().to_string();
     if ctype.starts_with("text/") { format!("{ctype}; charset=utf-8") } else { ctype }

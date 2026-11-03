@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -16,23 +16,31 @@ use crate::error::{AppError, ValidationErrors};
 use crate::models::{ProfileOut, ProfileReq, StressOut, StressReq, TestOut, TestReq};
 use crate::store::RunRow;
 
-/// `base_url: Optional[str] = None` from main.py: absent, empty, or whitespace-only all fall
-/// back to the configured LM Studio URL, so `#[serde(default)]` on an `Option` is the shape.
+/// Truthiness on the optional upstream API key: absent, null, or whitespace-only send no
+/// header — an empty `Bearer ` would be a guaranteed 401 from any key-checking gateway, and
+/// the keyless providers (LM Studio, Ollama) must be untouched. Present and non-blank, the
+/// value rides as `Authorization: Bearer <key>` on every completion call. The key is forwarded
+/// only: never persisted with the history row, never logged.
+fn bearer(api_key: &Option<String>) -> Option<String> {
+    api_key.as_deref().map(str::trim).filter(|k| !k.is_empty())
+        .map(|k| format!("Bearer {k}"))
+}
+
+/// `base_url` is optional on every request: absent, empty, or whitespace-only all fall back to
+/// the configured LM Studio URL, so `#[serde(default)]` on an `Option` is the shape.
 #[derive(Deserialize)]
 pub struct ModelQuery {
     #[serde(default)]
     pub base_url: Option<String>,
 }
 
-/// Python's `list_models`: one GET `{base}/v1/models` with a 10 s timeout, and *any* failure
-/// answers HTTP 200 with `{"error": ...}` — never a `Result`, because the frontend's
-/// `Array.isArray(m)` check is what separates a model list from a failure. A success answers a
-/// bare array of id strings, dropping entries whose `id` is missing, empty, or not a string,
-/// which is Python's truthiness filter `if m.get("id")`.
+/// `list_models`: one GET `{base}/v1/models` with a 10 s timeout, and *any* failure answers
+/// HTTP 200 with `{"error": ...}` — never a `Result`, because the frontend's `Array.isArray(m)`
+/// check is what separates a model list from a failure. A success answers a bare array of id
+/// strings, dropping entries whose `id` is missing, empty, or not a string.
 ///
-/// The client is `AppState.http`, built once in `main.rs`, not a new client per request the way
-/// `httpx.AsyncClient` is constructed inside the Python handler; the per-request `.timeout(10s)`
-/// still matches Python's `timeout=10`.
+/// The client is `AppState.http`, built once in `main.rs`, not a new client per request; the
+/// per-request `.timeout(10s)` overrides the shared builder's ceiling for this call.
 pub async fn list_models(State(st): State<AppState>, Query(q): Query<ModelQuery>) -> Json<Value> {
     let base = resolve_base(&st.cfg, q.base_url.as_deref());
     match st.http.get(format!("{base}/v1/models")).timeout(std::time::Duration::from_secs(10))
@@ -59,45 +67,74 @@ pub async fn list_models(State(st): State<AppState>, Query(q): Query<ModelQuery>
     }
 }
 
-/// Python samples psutil/pynvml inside this handler; `hw::Sampler` owns the counters now, so
-/// the handler just publishes the cached snapshot. `Snapshot::to_json` fixes the key order.
+/// The `hw::Sampler` owns the CPU, RAM and GPU counters, so the handler just publishes the
+/// cached snapshot. `Snapshot::to_json` fixes the key order.
 pub async fn hardware(State(st): State<AppState>) -> Json<Value> {
     Json(st.hw.snapshot().await.to_json())
 }
 
-/// Python's `deque(maxlen=60)` handed back as `list(history)`: oldest-first, at most sixty
-/// entries. A failed read is a runtime failure, so it answers the mandated 200 `{"error": …}`
-/// through `AppError` instead of `unwrap_or_default()` — an empty list is a legitimate answer
-/// ("no runs yet"), and it must not be indistinguishable from "the database is unavailable".
-pub async fn get_history(State(st): State<AppState>) -> Result<Json<Value>, AppError> {
-    let rows = st.db.recent_runs(60).await?;
-    Ok(Json(Value::Array(rows.iter().map(|r| r.to_history_json()).collect())))
+/// `GET /api/history`: the most recent sixty rows, oldest-first. A failed read is a runtime
+/// failure, so it answers the mandated 200 `{"error": …}` through `AppError` instead of
+/// `unwrap_or_default()` — an empty list is a legitimate answer ("no runs yet"), and it must
+/// not be indistinguishable from "the database is unavailable". The dashboard's history pager
+/// adds optional `?limit=`/`?offset=` windows over the whole dataset and an `X-Total-Runs`
+/// header carrying the unfiltered row count, so it can render Prev/Next without a second
+/// endpoint. The body shape never changes.
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
 }
 
-/// Python's `get_profile` (main.py:160). The mutable part (`name`, `notes`) comes from the
-/// SQLite `profile` row; the immutable part from `ProfileStatic`, captured once at startup —
-/// rebuilding system info per request is the per-call `psutil` cost this port removes
-/// (ruling R4). `ram_total_gb` rides the `Sampler`'s cached snapshot instead, and the `gpu*`
-/// fields come from the handle the sampler already samples.
-/// `ProfileOut::to_json` fixes the key order to Python's dict order (main.py:163).
+pub async fn get_history(State(st): State<AppState>, Query(q): Query<HistoryQuery>)
+    -> Result<Response, AppError>
+{
+    let (rows, total) = st.db.runs_page(
+        q.limit.unwrap_or(60).clamp(1, 500), q.offset.unwrap_or(0).max(0)).await?;
+    let mut resp = Json(Value::Array(rows.iter().map(|r| r.to_history_json()).collect()))
+        .into_response();
+    resp.headers_mut().insert(axum::http::HeaderName::from_static("x-total-runs"),
+                              axum::http::HeaderValue::from(total));
+    Ok(resp)
+}
+
+/// `DELETE /api/history/{id}`: the dashboard's per-row ✕. Removes exactly the named run and
+/// answers `{"deleted": n, "total": newTotal}` — `total` is the fresh row count so the UI can
+/// clamp its pager without a second request. An unknown id is `{"deleted": 0, "total": …}`
+/// (still 200 — nothing failed), and a store failure rides the mandated `{"error": …}`
+/// envelope through `AppError`. A non-numeric `{id}` never reaches the handler: axum's
+/// `Path<i64>` answers it 400 before any state is touched.
+pub async fn delete_run(State(st): State<AppState>, Path(id): Path<i64>)
+    -> Result<Json<Value>, AppError>
+{
+    let (deleted, total) = st.db.delete_run(id).await?;
+    Ok(Json(json!({ "deleted": deleted, "total": total })))
+}
+
+/// `GET /api/profile`: the mutable part (`name`, `notes`) comes from the SQLite `profile` row;
+/// the immutable part from `ProfileStatic`, captured once at startup — rebuilding system info
+/// per request is the per-call sampling cost this design avoids. `ram_total_gb` rides the
+/// `Sampler`'s cached snapshot instead, and the `gpu*` fields come from the handle the sampler
+/// already samples. `ProfileOut::to_json` fixes the wire key order.
 /// A failed read is a runtime failure, so it answers the mandated 200 `{"error": …}` through
-/// `AppError` rather than the factory profile: the old `.unwrap_or(default)` silently turned a
+/// `AppError` rather than the factory profile: a `.unwrap_or(default)` would silently turn a
 /// busy database into a "My workstation" the next Save would write back over the real row.
 pub async fn get_profile(State(st): State<AppState>) -> Result<Json<Value>, AppError> {
     let p = st.db.profile().await?;
     let s = st.hw.snapshot().await;
     let sys = &st.sys;   // the startup-captured machine facts; see the note above
-    // Python's `if HAS_GPU:` block (main.py:178-186) is all-or-nothing: the dict literal is
-    // fully evaluated before `prof.update`, so any failed NVML query emits `gpu_error` alone,
-    // never a partial `gpu`/`gpu_vram_gb`/`gpu_driver` trio. `available()` is that flag, and
-    // the "None detected" string is Python's own (main.py:182).
+    // The GPU block is all-or-nothing: the profile fields are assembled in one shot, so any
+    // failed NVML query emits `gpu_error` alone, never a partial `gpu`/`gpu_vram_gb`/
+    // `gpu_driver` trio. `available()` is that flag, and "None detected" is the fallback name.
     let (gpu, gpu_vram_gb, gpu_driver, gpu_error) = if !st.gpu.available() {
         (Some("None detected".to_string()), None, None, None)
     } else {
         match (st.gpu.name(), st.gpu.vram_gb(), st.gpu.driver()) {
             (Some(name), Some(vram), Some(driver)) => (Some(name), Some(vram), Some(driver), None),
             // The trait reports a missing field, not the NVML error text, so the wording is
-            // generic here (Python interpolates `str(e)`); spec deviation, values still parity.
+            // generic here; the values still surface what the driver could report.
             _ => (None, None, None,
                   Some(st.gpu.error().unwrap_or_else(|| "NVML query failed".into()))),
         }
@@ -112,16 +149,16 @@ pub async fn get_profile(State(st): State<AppState>) -> Result<Json<Value>, AppE
     Ok(Json(out.to_json()))
 }
 
-/// Python's `set_profile` (main.py:189): absent or `null` leaves the stored value unchanged,
-/// present (including `""`) overwrites; the reply is the bare `{"name", "notes"}` dict.
+/// `set_profile`: absent or `null` leaves the stored value unchanged, present (including `""`)
+/// overwrites; the reply is the bare `{"name", "notes"}` object.
 ///
 /// The body goes through the one shared mapping, `ValidationErrors::parse_json_body` — a
-/// malformed body is FastAPI's 422 `{"detail": [ ... ]}` (never axum's plain-text 400), and a
-/// wrong-typed `name`/`notes` is the `string_type` entry captured live from `:8501`.
+/// malformed body is the 422 `{"detail": [ ... ]}` envelope (never axum's plain-text 400), and
+/// a wrong-typed `name`/`notes` is the `string_type` detail entry.
 ///
 /// The `Err` arm is `AppError`, not a swallowed write: a failed `UPDATE profile` must answer the
-/// mandated 200 `{"error": …}`, and must never answer the stale row, because
-/// `static/index.html:329` prints "Profile saved" whatever the body says.
+/// mandated 200 `{"error": …}`, and must never answer the stale row, because the dashboard
+/// prints "Profile saved" whatever the body says.
 pub async fn set_profile(State(st): State<AppState>, body: Bytes) -> Result<Response, AppError> {
     let req = match ValidationErrors::parse_json_body::<ProfileReq>(&body, ProfileReq::FIELDS) {
         Ok(req) => req,
@@ -131,15 +168,13 @@ pub async fn set_profile(State(st): State<AppState>, body: Bytes) -> Result<Resp
     Ok(Json(json!({ "name": p.name, "notes": p.notes })).into_response())
 }
 
-/// Python's `run_test` (main.py:78). Validation (422) happens before the probe, exactly like
-/// FastAPI validates the model before the handler body runs; a runtime failure is the mandated
+/// `run_test`: validation (422) happens before the probe; a runtime failure is the mandated
 /// 200 `{"error": …}` through `AppError`; a success is persisted through `Db::insert_run` so
-/// Task 7's history sees it — the DB write failing is itself a runtime failure, answered
-/// through `AppError` rather than swallowed (the Task 4 review ruling: a lost write must not
-/// look like a success).
+/// `/api/history` sees it — the DB write failing is itself a runtime failure, answered
+/// through `AppError` rather than swallowed, because a lost write must not look like a success.
 pub async fn run_test(State(st): State<AppState>, body: Bytes) -> Response {
     // Type AND `max_tokens` bounds are checked by the one shared pass, so a 422 carries every
-    // offending field exactly as pydantic's does (see `TestReq::FIELDS`).
+    // offending field at once (see `TestReq::FIELDS`).
     let req = match ValidationErrors::parse_json_body::<TestReq>(&body, TestReq::FIELDS) {
         Ok(req) => req,
         Err(v) => return v.into_response(),
@@ -153,14 +188,12 @@ pub async fn run_test(State(st): State<AppState>, body: Bytes) -> Response {
     }
 }
 
-/// Python's `stress_test` (main.py:197). The body goes through the shared 422 pass first
-/// (`concurrency` 1..=32 and `requests` 1..=500 are bounds like `max_tokens`); then `requests`
-/// tasks run behind a semaphore of `concurrency` permits, each timing one non-streaming
-/// completion. A failed call never becomes an HTTP error — it lands in `errors`/`error_samples`
-/// and the endpoint still answers 200 with the aggregate, because Python has no error path here
-/// at all. The history row is written even when every call failed, also like Python, which
-/// appends it after the gather unconditionally; a lost write is the one case Python cannot have
-/// and this port reports through `AppError` rather than swallowing (ruling R11).
+/// `stress_test`: the body goes through the shared 422 pass first (`concurrency` 1..=32 and
+/// `requests` 1..=500 are bounds like `max_tokens`); then `requests` tasks run behind a
+/// semaphore of `concurrency` permits, each timing one non-streaming completion. A failed call
+/// never becomes an HTTP error — it lands in `errors`/`error_samples` and the endpoint still
+/// answers 200 with the aggregate. The history row is written even when every call failed; a
+/// lost write is reported through `AppError` rather than swallowed.
 pub async fn stress_test(State(st): State<AppState>, body: Bytes) -> Response {
     let req = match ValidationErrors::parse_json_body::<StressReq>(&body, StressReq::FIELDS) {
         Ok(req) => req,
@@ -174,7 +207,7 @@ pub async fn stress_test(State(st): State<AppState>, body: Bytes) -> Response {
         let (sem, http, base, req) = (sem.clone(), st.http.clone(), base.clone(), req.clone());
         handles.push(tokio::spawn(async move {
             // The permit is held until this block ends, so at most `concurrency` tasks are in
-            // flight at once — Python's `async with sem`.
+            // flight at once.
             let _permit = match sem.acquire().await {
                 Ok(p) => p,
                 Err(_) => return Err("semaphore closed".to_string()),
@@ -183,15 +216,18 @@ pub async fn stress_test(State(st): State<AppState>, body: Bytes) -> Response {
             let payload = json!({ "model": req.model,
                 "messages": [{"role": "user", "content": req.prompt}],
                 "max_tokens": req.max_tokens });
-            let r = match http.post(format!("{base}/v1/chat/completions"))
-                .timeout(Duration::from_secs(300)).json(&payload).send().await
+            let mut rb = http.post(format!("{base}/v1/chat/completions"));
+            if let Some(a) = bearer(&req.api_key) {
+                rb = rb.header(reqwest::header::AUTHORIZATION, a);
+            }
+            let r = match rb.timeout(Duration::from_secs(300)).json(&payload).send().await
             {
                 Ok(r) => r,
                 Err(e) => return Err(e.to_string()),
             };
             // `Response::bytes` consumes the response, so read the status first. The body is
-            // read before the elapsed time is taken and parsed after: httpx's `post()` returns
-            // only once the body is read, and Python timestamps before `r.json()`.
+            // read before the elapsed time is taken and parsed after, so the timing covers
+            // body transfer rather than stopping at the response headers.
             let code = r.status().as_u16();
             let bytes = match r.bytes().await {
                 Ok(b) => b,
@@ -199,7 +235,7 @@ pub async fn stress_test(State(st): State<AppState>, body: Bytes) -> Response {
             };
             let elapsed = t.elapsed().as_secs_f64();
             if code >= 400 {
-                // Python's exact wording: the bare number, no reason phrase and no body.
+                // The bare number, no reason phrase and no body.
                 return Err(format!("HTTP {code}"));
             }
             match serde_json::from_slice::<Value>(&bytes) {
@@ -231,11 +267,12 @@ pub async fn stress_test(State(st): State<AppState>, body: Bytes) -> Response {
         wall_s: agg.wall_s, avg_latency_s: agg.avg_latency_s, p95_latency_s: agg.p95_latency_s,
         total_tokens: agg.total_tokens, agg_tok_per_s: agg.agg_tok_per_s, req_per_s: agg.req_per_s,
     };
-    // main.py:259-267's synthetic history entry: the model suffixed with the concurrency, no
-    // TTFT, `total_s` = wall, `tok_per_s` = the aggregate throughput.
+    // The synthetic history entry for a stress run: the model suffixed with the concurrency,
+    // no TTFT, `total_s` = wall, `tok_per_s` = the aggregate throughput.
     let row = RunRow {
+        id: 0,
         kind: "stress".into(),
-        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+        timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         model: format!("{} (stress x{})", req.model, req.concurrency),
         max_tokens: req.max_tokens, ttft_ms: None, total_s: out.wall_s,
         tokens: out.total_tokens, tok_per_s: out.agg_tok_per_s,
@@ -282,27 +319,29 @@ pub async fn fetch_prompts(State(st): State<AppState>) -> Result<Json<Value>, Ap
     Ok(Json(json!({ "added": added, "failed": failed })))
 }
 
-/// The whole probe against `base`, no Axum types: the same two upstream calls as Python —
-/// a streaming one-token TTFT probe (60 s) and a full non-streaming completion (300 s) whose
+/// The whole probe against `base`, no Axum types: two upstream calls — a streaming one-token
+/// TTFT probe (60 s) and a full non-streaming completion (300 s) whose
 /// `usage.completion_tokens / elapsed` is the token rate. Returns the wire value and the row
 /// to persist. The client is the shared `AppState.http`; the per-request `.timeout()` calls
-/// override the builder's 300 s ceiling exactly like Python's per-call `httpx` clients.
+/// override the builder's 300 s ceiling for each call.
 async fn probe(req: &TestReq, cfg: &Config, http: &reqwest::Client)
     -> Result<(Value, RunRow), AppError>
 {
     let base = resolve_base(cfg, req.base_url.as_deref());
+    let auth = bearer(&req.api_key);
 
-    // 1) TTFT: stream ONE token — main.py:93 sends `"max_tokens": 1`, not `req.max_tokens`;
-    //    streaming the full budget would measure total time, not first-token time.
+    // 1) TTFT: stream ONE token — `"max_tokens": 1`, not `req.max_tokens`; streaming the full
+    //    budget would measure total time, not first-token time.
     let payload = json!({
         "model": req.model, "messages": [{"role": "user", "content": req.prompt}],
         "max_tokens": 1, "stream": true });
     let t0 = Instant::now();
-    let r = http.post(format!("{base}/v1/chat/completions"))
-        .timeout(Duration::from_secs(60)).json(&payload).send().await
+    let mut rb = http.post(format!("{base}/v1/chat/completions"));
+    if let Some(a) = &auth { rb = rb.header(reqwest::header::AUTHORIZATION, a); }
+    let r = rb.timeout(Duration::from_secs(60)).json(&payload).send().await
         .map_err(|e| AppError(format!("TTFT probe failed: {e}")))?;
     if r.status().as_u16() >= 400 {
-        // Python formats `HTTP {r.status_code}` — the bare number, not hyper's "400 Bad Request".
+        // Format `HTTP {code}` — the bare number, not hyper's "400 Bad Request".
         let code = r.status().as_u16();
         let body = r.text().await.unwrap_or_default();
         return Err(AppError(format!("TTFT probe failed: HTTP {code}: {body}")));
@@ -320,14 +359,14 @@ async fn probe(req: &TestReq, cfg: &Config, http: &reqwest::Client)
     };
 
     // 2) Token rate: non-streaming, full max_tokens. The body is consumed before `elapsed` is
-    //    taken because httpx's `post()` returns only after the response body is read; timing
-    //    it at the headers would drop body-transfer time Python counts.
+    //    taken, so the timing includes body transfer rather than stopping at the headers.
     let t1 = Instant::now();
     let payload2 = json!({
         "model": req.model, "messages": [{"role": "user", "content": req.prompt}],
         "max_tokens": req.max_tokens });
-    let r2 = http.post(format!("{base}/v1/chat/completions"))
-        .timeout(Duration::from_secs(300)).json(&payload2).send().await
+    let mut rb = http.post(format!("{base}/v1/chat/completions"));
+    if let Some(a) = &auth { rb = rb.header(reqwest::header::AUTHORIZATION, a); }
+    let r2 = rb.timeout(Duration::from_secs(300)).json(&payload2).send().await
         .map_err(|e| AppError(format!("Inference failed: {e}")))?;
     let status = r2.status();
     let text = r2.text().await.map_err(|e| AppError(format!("Inference failed: {e}")))?;
@@ -341,15 +380,15 @@ async fn probe(req: &TestReq, cfg: &Config, http: &reqwest::Client)
         .and_then(|c| c.as_i64()).unwrap_or(0);
     let tps = if elapsed > 0.0 { round_half_even(tokens as f64 / elapsed, 1) } else { 0.0 };
 
-    // Python's truthiness: `"ttft_ms": round(ttft_ms, 1) if ttft_ms else None` — the *unrounded*
-    // value decides, and a falsy one emits a null key (the key is never dropped; a probe that
-    // raised never reaches this struct at all).
+    // The *unrounded* TTFT decides: a zero value emits `ttft_ms: null` (the key is never
+    // dropped; a probe that raised never reaches this struct at all).
     let out = TestOut {
-        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+        timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         model: req.model.clone(), max_tokens: req.max_tokens,
         ttft_ms: ttft_ms.filter(|v| *v != 0.0).map(|v| round_half_even(v, 1)),
         total_s: round_half_even(elapsed, 2), tokens, tok_per_s: tps };
     let row = RunRow {
+        id: 0,
         kind: "single".into(), timestamp: out.timestamp.clone(), model: out.model.clone(),
         max_tokens: out.max_tokens, ttft_ms: out.ttft_ms, total_s: out.total_s,
         tokens: out.tokens, tok_per_s: out.tok_per_s, concurrency: None, base_url: None };

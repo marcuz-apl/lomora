@@ -30,13 +30,13 @@ async fn malformed_json_body_is_422_not_200() {
     assert_eq!(resp.status(), 422);
 }
 
-// The 422 detail entry's key SEQUENCE is load-bearing: Python emits {"type","loc","msg",
-// "input","ctx"} in dict-insertion order, which only survives to the wire because serde_json
-// is built with `preserve_order`. A BTreeMap (feature off) re-sorts alphabetically and every
+// The 422 detail entry's key SEQUENCE is load-bearing: the entry emits {"type","loc","msg",
+// "input","ctx"} in insertion order, which only survives to the wire because serde_json is
+// built with `preserve_order`. A BTreeMap (feature off) re-sorts alphabetically and every
 // other test still passes, so this walks detail[0] and compares the ordered key list rather
 // than a parsed map. It fails the moment `preserve_order` is dropped from Cargo.toml.
 #[tokio::test]
-async fn validation_error_detail_keys_keep_python_order() {
+async fn validation_error_detail_keys_keep_their_order() {
     let (base, _h) = spawn_app().await;
     let resp = reqwest::Client::new()
         .post(format!("{base}/api/test"))
@@ -50,18 +50,20 @@ async fn validation_error_detail_keys_keep_python_order() {
         .expect("detail[0] must be a JSON object");
     let keys: Vec<&str> = entry.keys().map(String::as_str).collect();
     assert_eq!(keys, vec!["type", "loc", "msg", "input", "ctx"],
-        "422 detail entry keys must appear in Python's dict insertion order, got: {keys:?}");
+        "422 detail entry keys must appear in insertion order, got: {keys:?}");
 }
 
 // A runtime failure answers HTTP 200 with a {"error": ...} object and nothing else; index.html
-// reads data.error. A 4xx or an extra sibling key would break the dashboard silently.
+// reads data.error. A 4xx or an extra sibling key would break the dashboard silently. The dead
+// base_url is explicit (same convention as stress_endpoint): leaning on "nothing listens on the
+// default :1234" broke the day a real LLM server came up on this machine and the probe succeeded.
 #[tokio::test]
 async fn runtime_failure_is_200_with_only_an_error_key() {
     let (base, _h) = spawn_app().await;
     let resp = reqwest::Client::new()
         .post(format!("{base}/api/test"))
         .header("content-type", "application/json")
-        .body(r#"{"model":"m"}"#)
+        .body(r#"{"model":"m","base_url":"http://127.0.0.1:9"}"#)
         .send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
@@ -69,7 +71,7 @@ async fn runtime_failure_is_200_with_only_an_error_key() {
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(keys, vec!["error"],
         "the {{\"error\": ...}} envelope must carry exactly one key, got: {keys:?}");
-    // The message is a live connection failure now that Task 5 replaced the placeholder; the
-    // invariant is that it is a non-empty string, not a particular wording.
+    // The message is a live connection failure; the invariant is that it is a non-empty string,
+    // not a particular wording.
     assert!(obj["error"].as_str().is_some_and(|s| !s.is_empty()), "{body}");
 }

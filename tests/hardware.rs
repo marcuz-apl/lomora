@@ -3,7 +3,7 @@ use support::spawn_app;
 use serde_json::Value;
 
 #[tokio::test]
-async fn hardware_reports_the_four_base_keys_in_python_order() {
+async fn hardware_reports_the_four_base_keys_first() {
     let (base, _h) = spawn_app().await;
     let v: Value = reqwest::get(format!("{base}/api/hardware")).await.unwrap().json().await.unwrap();
     let keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();

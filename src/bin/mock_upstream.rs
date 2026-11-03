@@ -1,8 +1,8 @@
-//! Standalone mock upstream process. Tasks 5 and 8 diff Rust against Python through this, and
-//! the Python app can only reach a mock that is a separate OS process, so it answers from
-//! `lomora::mock::router()` — the same construction the in-process tests bind.
+//! Standalone mock upstream process. Running it over the network exercises the same routes the
+//! in-process tests bind, from a separate OS process, so it answers from
+//! `lomora::mock::router()` — the same construction the in-process tests use.
 //!
-//! Run: `cd rust && cargo run --bin mock_upstream [port]` (default `127.0.0.1:8600`).
+//! Run: `cargo run --bin mock_upstream [port]` (default `127.0.0.1:8600`).
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
