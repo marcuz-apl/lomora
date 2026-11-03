@@ -2,8 +2,8 @@
 //! `routes.rs` serves the last published snapshot instead of touching `sysinfo`/NVML itself,
 //! so request handlers never block on a system scan.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
@@ -28,10 +28,11 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// Wire shape for `GET /api/hardware`, kept here so the key order is one reviewed list and
-    /// unit-testable without real hardware. The key order is fixed: the base four first, then
-    /// the GPU four appended — and when there is no GPU those keys are *absent*, never emitted
-    /// as `null`.
-    pub fn to_json(&self) -> Value {
+    /// unit-testable without real hardware. The key order is fixed: the base four first, the
+    /// GPU four appended while a card is live, and `gpu_status` last. A missing GPU omits its
+    /// four keys (never `null`), but `gpu_status` is always present so the dashboard can
+    /// explain *why* the counters are missing.
+    pub fn to_json(&self, status: &str) -> Value {
         let mut v = json!({
             "cpu_percent": self.cpu_percent,
             "ram_percent": self.ram_percent,
@@ -44,6 +45,7 @@ impl Snapshot {
             v["gpu_mem_tot"] = json!(g.mem_total_mb);
             v["gpu_temp_c"] = json!(g.temp_c);
         }
+        v["gpu_status"] = json!(status);
         v
     }
 }
@@ -142,6 +144,146 @@ impl Gpu for NvmlGpu {
     }
 }
 
+/// How often a missing NVML is retried. A failed `dlopen` is cheap, but ten seconds keeps the
+/// sampler loop from hammering the loader while a user is installing the driver.
+const GPU_RECHECK_EVERY: Duration = Duration::from_secs(10);
+
+/// The process's GPU slot, shared by the sampler and the profile endpoint. A driver installed
+/// while the dashboard is open is picked up by the next `refresh` — no process restart, which
+/// is what makes the dashboard's "install the driver, then reload" hint true.
+#[derive(Clone)]
+pub struct GpuHandle {
+    slot: Arc<StdRwLock<Arc<dyn Gpu>>>,
+    recheck: bool,
+    last_attempt: Arc<Mutex<Option<Instant>>>,
+}
+
+impl GpuHandle {
+    /// A slot that never re-detects. Tests use this so a developer machine with a card cannot
+    /// turn its `NoGpu` into real counters mid-run.
+    pub fn fixed(gpu: Arc<dyn Gpu>) -> GpuHandle {
+        GpuHandle { slot: Arc::new(StdRwLock::new(gpu)), recheck: false,
+                    last_attempt: Arc::new(Mutex::new(None)) }
+    }
+
+    /// The production slot: while no card is available, `refresh` retries detection at most
+    /// every ten seconds. A successful open replaces the `NoGpu` handle, so the very next
+    /// sample and profile read see the card.
+    pub fn rechecking(gpu: Arc<dyn Gpu>) -> GpuHandle {
+        GpuHandle { recheck: true, ..GpuHandle::fixed(gpu) }
+    }
+
+    /// The current handle, cloned out of the slot so callers never hold the lock across an
+    /// NVML query.
+    pub fn current(&self) -> Arc<dyn Gpu> {
+        self.slot.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Throttled re-detection for the sampler loop: a no-op for `fixed` slots and while a card
+    /// is already available.
+    pub fn refresh(&self) {
+        if !self.recheck || self.current().available() { return; }
+        {
+            let mut last = self.last_attempt.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_some_and(|t| t.elapsed() < GPU_RECHECK_EVERY) { return; }
+            *last = Some(Instant::now());
+        }
+        if let Some(g) = NvmlGpu::open(0) {
+            *self.slot.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(g);
+        }
+    }
+}
+
+/// The dashboard's answer to "should I install a driver?". NVML is the only path to GPU
+/// counters, so when it is unavailable the remaining question is whether an NVIDIA display
+/// device exists at all — that is what the probe adds. The closure keeps the probe lazy: an
+/// available GPU returns `"ok"` without paying for it. Values are pinned by the dashboard's
+/// hint text: `ok`, `driver_missing`, `no_nvidia`, `unsupported`, `unknown`.
+pub fn gpu_status(available: bool, probe: impl FnOnce() -> Option<bool>) -> &'static str {
+    if available {
+        return "ok";
+    }
+    // NVIDIA stopped shipping macOS drivers after High Sierra, so there is nothing to install
+    // even on a machine with an old card; the dashboard says that instead of linking a
+    // download that cannot work.
+    if cfg!(target_os = "macos") {
+        return "unsupported";
+    }
+    match probe() {
+        Some(true) => "driver_missing",
+        Some(false) => "no_nvidia",
+        None => "unknown",
+    }
+}
+
+/// Cached vendor-probe result: `/api/hardware` is polled every few seconds, and on Windows
+/// the probe spawns a process, so the answer is computed once per process. A stale "no card"
+/// cannot outlive a driver install: once NVML opens the card, `available` answers `"ok"` and
+/// the probe is never consulted again.
+static NVIDIA_PRESENT: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+
+/// Best-effort "is an NVIDIA display device installed?", independent of its driver. Only the
+/// driverless case needs it: with NVML available the card's own name is the better answer.
+pub fn nvidia_present() -> Option<bool> {
+    *NVIDIA_PRESENT.get_or_init(probe_nvidia)
+}
+
+#[cfg(target_os = "linux")]
+fn probe_nvidia() -> Option<bool> {
+    nvidia_in_sysfs(std::path::Path::new("/sys/bus/pci/devices"))
+}
+
+/// PCI display controllers are class `0x03xxxx`. The class filter matters: an NVIDIA GPU also
+/// exposes a class `0x0403` audio function, which must not make a machine with no display
+/// device look like it has a card. `None` means sysfs could not answer, not "no card".
+#[cfg(target_os = "linux")]
+fn nvidia_in_sysfs(root: &std::path::Path) -> Option<bool> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut saw_display = false;
+    for entry in entries.flatten() {
+        let dev = entry.path();
+        let Ok(class) = std::fs::read_to_string(dev.join("class")) else { continue };
+        if !class.trim().starts_with("0x03") { continue; }
+        saw_display = true;
+        let Ok(vendor) = std::fs::read_to_string(dev.join("vendor")) else { continue };
+        if vendor.trim().eq_ignore_ascii_case("0x10de") { return Some(true); }
+    }
+    saw_display.then_some(false)
+}
+
+/// Windows keeps the PnP hardware id even while the card is driven by the generic Basic
+/// Display Adapter, so `VEN_10DE` separates "driver missing" from "no NVIDIA card". One lazy
+/// PowerShell run, cached above; `-NoProfile` keeps it from loading a user profile.
+#[cfg(windows)]
+fn probe_nvidia() -> Option<bool> {
+    use std::os::windows::process::CommandExt;
+    // Keep the console from flashing on a dashboard poll.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command",
+               "Get-CimInstance -ClassName Win32_VideoController | Select-Object -ExpandProperty PNPDeviceID"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output().ok()?;
+    if !out.status.success() { return None; }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Empty output means the query produced nothing (CIM failure, stripped-down image), not
+    // that the machine has no video controller.
+    if text.trim().is_empty() { return None; }
+    Some(contains_nvidia_hwid(&text))
+}
+
+#[cfg(windows)]
+fn contains_nvidia_hwid(text: &str) -> bool {
+    text.lines().any(|l| l.to_ascii_uppercase().contains("VEN_10DE"))
+}
+
+/// Everything except Linux and Windows: current macOS has no NVIDIA driver path at all, and
+/// `gpu_status` already answers "unsupported" before consulting this.
+#[cfg(not(any(target_os = "linux", windows)))]
+fn probe_nvidia() -> Option<bool> {
+    Some(false)
+}
+
 /// The published snapshot plus the task that republishes it. Cheap to clone; every request
 /// handler reads it instead of sampling.
 #[derive(Clone)]
@@ -198,16 +340,18 @@ impl Sampler {
     /// The seed snapshot still carries real memory (and GPU) counters: `new_all()` refreshes
     /// them immediately, so a request that lands before the second tick reports the machine's
     /// RAM instead of zeros. Only `cpu_percent` waits for its delta window.
-    pub async fn spawn(gpu: Arc<dyn Gpu>, interval: Duration) -> Sampler {
+    pub async fn spawn(gpu: GpuHandle, interval: Duration) -> Sampler {
         // 0.40's constructors return Result. If a System handle cannot be built there is
         // nothing to sample, and the sampler keeps serving its GPU-only seed.
         let Ok(mut sys) = sysinfo::System::new_all() else {
-            let first = Snapshot { gpu: gpu.sample(), ..Default::default() };
+            gpu.refresh();
+            let first = Snapshot { gpu: gpu.current().sample(), ..Default::default() };
             return Sampler::new(first);
         };
         // new_all() has only opened the first CPU window, so the seed's percentage is 0 by
         // construction; force it rather than inherit whatever sysinfo happens to report.
-        let mut first = snap(&sys, &*gpu);
+        gpu.refresh();
+        let mut first = snap(&sys, &*gpu.current());
         first.cpu_percent = 0.0;
         let sampler = Sampler::new(first);
         let shared = sampler.0.clone();
@@ -222,7 +366,10 @@ impl Sampler {
                     first_tick = false;
                     continue;
                 }
-                *shared.write().await = snap(&sys, &*gpu);
+                // The slot is re-checked on the sampler's own cadence, so a newly installed
+                // driver appears without touching the process.
+                gpu.refresh();
+                *shared.write().await = snap(&sys, &*gpu.current());
             }
         });
         sampler
@@ -251,7 +398,7 @@ fn snap(sys: &sysinfo::System, gpu: &dyn Gpu) -> Snapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuSnapshot, NoGpu, Sampler, Snapshot};
+    use super::{GpuHandle, GpuSnapshot, NoGpu, Sampler, Snapshot};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -266,7 +413,7 @@ mod tests {
             ram_total_gb: 223.66,
             gpu: Some(GpuSnapshot { util: 0, mem_used_mb: 10156, mem_total_mb: 16384, temp_c: 35 }),
         };
-        let v = snap.to_json();
+        let v = snap.to_json("ok");
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             keys,
@@ -278,20 +425,93 @@ mod tests {
                 "gpu_util",
                 "gpu_mem_mb",
                 "gpu_mem_tot",
-                "gpu_temp_c"
+                "gpu_temp_c",
+                "gpu_status"
             ]
         );
         assert_eq!(v["gpu_mem_tot"].as_u64(), Some(16384));
+        assert_eq!(v["gpu_status"], "ok");
     }
 
     #[test]
     fn no_gpu_means_absent_keys_and_never_null() {
-        let v = Snapshot { ram_total_gb: 223.66, ..Default::default() }.to_json();
+        let v = Snapshot { ram_total_gb: 223.66, ..Default::default() }.to_json("driver_missing");
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 4);
+        assert_eq!(obj.len(), 5);
         for k in ["gpu_util", "gpu_mem_mb", "gpu_mem_tot", "gpu_temp_c"] {
             assert!(obj.get(k).is_none(), "{k} must be absent without a GPU");
         }
+        // The status is always present so the dashboard can explain the absence.
+        assert_eq!(v["gpu_status"], "driver_missing");
+    }
+
+    // The hint under the cards depends on this status, so pin every branch. The probe is a
+    // closure so "available" can be shown not to pay for it.
+    #[test]
+    fn status_is_ok_without_probing_when_nvml_is_available() {
+        use super::gpu_status;
+        let probed = std::cell::Cell::new(false);
+        assert_eq!(gpu_status(true, || { probed.set(true); None }), "ok");
+        assert!(!probed.get(), "an available GPU must not pay for the PCI probe");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn status_separates_a_missing_driver_from_a_missing_card() {
+        use super::gpu_status;
+        assert_eq!(gpu_status(false, || Some(true)), "driver_missing");
+        assert_eq!(gpu_status(false, || Some(false)), "no_nvidia");
+        assert_eq!(gpu_status(false, || None), "unknown");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn status_is_unsupported_on_macos() {
+        use super::gpu_status;
+        // Even a genuine NVIDIA card has no driver to install on current macOS.
+        assert_eq!(gpu_status(false, || Some(true)), "unsupported");
+    }
+
+    // `/sys/bus/pci/devices` exists on every Linux box but its contents are machine-specific,
+    // so the classifier runs against a fixture tree instead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sysfs_scan_counts_only_nvidia_display_controllers() {
+        use super::nvidia_in_sysfs;
+        let root = std::env::temp_dir()
+            .join(format!("lomora-sysfs-{}", std::process::id()));
+        let dev = |name: &str, class: &str, vendor: &str| {
+            let p = root.join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("class"), class).unwrap();
+            std::fs::write(p.join("vendor"), vendor).unwrap();
+        };
+        let _ = std::fs::remove_dir_all(&root);
+        dev("0000:01:00.0", "0x030000\n", "0x10de\n");
+        assert_eq!(nvidia_in_sysfs(&root), Some(true));
+
+        // An NVIDIA GPU also exposes a class 0x0403 audio function; that is not a display
+        // device and must not make a driverless machine look like it has a card.
+        std::fs::remove_dir_all(&root).unwrap();
+        dev("0000:01:00.1", "0x040300\n", "0x10de\n");
+        assert_eq!(nvidia_in_sysfs(&root), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
+        dev("0000:03:00.0", "0x030000\n", "0x1002\n");
+        assert_eq!(nvidia_in_sysfs(&root), Some(false));
+
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(nvidia_in_sysfs(&root), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hwid_parser_recognises_the_nvidia_vendor() {
+        use super::contains_nvidia_hwid;
+        assert!(contains_nvidia_hwid("PCI\\VEN_10DE&DEV_1B02"));
+        assert!(contains_nvidia_hwid("pci\\ven_10de&dev_1b02"));
+        assert!(!contains_nvidia_hwid("PCI\\VEN_1002&DEV_67DF"));
+        assert!(!contains_nvidia_hwid(""));
     }
 
     // `gpu_mem_tot` = 16384 on the P5000 comes from this divisor, not from NVML itself, so pin
@@ -319,7 +539,8 @@ mod tests {
     async fn spawn_seeds_ram_before_the_first_tick_is_published() {
         // The 60ms interval plus the discarded first tick means a handler that answers
         // immediately reads the seed, and the seed must not claim 0 GB of RAM.
-        let sampler = Sampler::spawn(Arc::new(NoGpu), Duration::from_millis(60)).await;
+        let sampler = Sampler::spawn(GpuHandle::fixed(Arc::new(NoGpu)),
+                                     Duration::from_millis(60)).await;
         let snap = sampler.snapshot().await;
         assert!(snap.ram_total_gb > 0.5, "seed ram_total_gb is wrong: {}", snap.ram_total_gb);
         assert!(snap.ram_used_gb <= snap.ram_total_gb);

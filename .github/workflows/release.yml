@@ -1,0 +1,91 @@
+name: Release
+
+# A tag push is the release trigger: the tag names the version, the crate version must agree,
+# and every platform is built, tested and published from that one commit.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            asset: lomora-windows-x86_64.exe
+            binary: target/release/lomora.exe
+          - os: ubuntu-latest
+            asset: lomora-linux-x86_64
+            binary: target/release/lomora
+          - os: macos-latest
+            asset: lomora-macos-aarch64
+            binary: target/release/lomora
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The release asset is only trustworthy if its version is the tag's version, so a
+      # forgotten Cargo.toml bump fails here instead of publishing a mislabelled binary.
+      - name: Tag must match the crate version
+        shell: bash
+        run: |
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ "v$crate" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+
+      # The suite is deterministic on every runner: tests use `NoGpu`, and NVML is loaded at
+      # runtime, so a machine without an NVIDIA driver still passes.
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Stage the binary under its release name
+        shell: bash
+        run: cp "${{ matrix.binary }}" "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # `merge-multiple` flattens the three artifacts into one folder, which is what the
+      # release upload expects.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            One self-contained binary per platform: the dashboard, the API, and the SQLite store are embedded, so there is nothing else to install. Run it and open http://localhost:8501.
+
+            | Platform | Asset |
+            |---|---|
+            | Windows x86_64 | `lomora-windows-x86_64.exe` |
+            | Linux x86_64 | `lomora-linux-x86_64` |
+            | macOS (Apple Silicon) | `lomora-macos-aarch64` |
+
+            - Run the binary from a folder of its own: the database is created at `data/lomora.db` beside the working directory. `PORT` and `LOMORA_DB` override the defaults.
+            - The binaries are unsigned. On Windows, SmartScreen shows "unknown publisher" once; choose *More info* then *Run anyway*. On macOS, right-click the binary and choose *Open* the first time, or run `chmod +x` and start it from a terminal.
+            - GPU metrics need an NVIDIA driver exposing NVML (`nvml.dll` on Windows, `libnvidia-ml.so` on Linux). Machines without one, including Apple Silicon Macs, report CPU and RAM only, and the dashboard explains why and links the Windows/Linux driver download when a card is present.

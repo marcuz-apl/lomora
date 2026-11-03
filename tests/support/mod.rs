@@ -77,9 +77,12 @@ async fn spawn_app_with(cfg: lomora::config::Config, db: lomora::store::Db)
         .await.unwrap();
     let addr = listener.local_addr().unwrap();
     // NoGpu keeps the endpoints deterministic: `/api/hardware` omits its GPU keys and
-    // `/api/profile` answers the no-NVML branch, `"gpu": "None detected"`. Real hardware
-    // presence is covered by a manual run against the dev machine, not by the test suite.
+    // `/api/profile` answers the no-NVML branch, `"gpu": "None detected"`. The slot is `fixed`,
+    // so the live re-check never turns it into real counters even on a machine with a card.
+    // Real hardware presence is covered by a manual run against the dev machine, not by the
+    // test suite.
     let gpu: std::sync::Arc<dyn lomora::hw::Gpu> = std::sync::Arc::new(lomora::hw::NoGpu);
+    let gpu = lomora::hw::GpuHandle::fixed(gpu);
     let hw = lomora::hw::Sampler::spawn(gpu.clone(), std::time::Duration::from_millis(60)).await;
     // Same shared-client shape as main.rs, so tests exercise the pooled path rather than a
     // per-request client.

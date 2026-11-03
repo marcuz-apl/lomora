@@ -5,11 +5,13 @@ async fn main() -> anyhow::Result<()> {
     let cfg = lomora::config::Config::from_env();
     let port = cfg.port;
     // GPU index 0 only; NVML absent -> NoGpu, which answers with the GPU keys missing rather
-    // than with nulls.
+    // than with nulls. The handle re-checks for NVML on a slow cadence, so a driver installed
+    // while the dashboard is open is picked up without restarting the process.
     let gpu: std::sync::Arc<dyn lomora::hw::Gpu> = match lomora::hw::NvmlGpu::open(0) {
         Some(g) => std::sync::Arc::new(g),
         None => std::sync::Arc::new(lomora::hw::NoGpu),
     };
+    let gpu = lomora::hw::GpuHandle::rechecking(gpu);
     // Same handle for the sampler and `GET /api/profile`: one NVML context per process.
     let hw = lomora::hw::Sampler::spawn(gpu.clone(), std::time::Duration::from_millis(500)).await;
     // One client for the whole process, so the connection pool is reused. The 10 s model-list

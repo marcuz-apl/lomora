@@ -26,6 +26,13 @@ fn bearer(api_key: &Option<String>) -> Option<String> {
         .map(|k| format!("Bearer {k}"))
 }
 
+/// `GET /api/version`: the version this binary was compiled from, read from the manifest at
+/// build time. The About dialog renders it, so the page carries no second copy that could
+/// drift from `Cargo.toml`.
+pub async fn version() -> Json<Value> {
+    Json(json!({ "version": env!("CARGO_PKG_VERSION") }))
+}
+
 /// `base_url` is optional on every request: absent, empty, or whitespace-only all fall back to
 /// the configured LM Studio URL, so `#[serde(default)]` on an `Option` is the shape.
 #[derive(Deserialize)]
@@ -69,8 +76,14 @@ pub async fn list_models(State(st): State<AppState>, Query(q): Query<ModelQuery>
 
 /// The `hw::Sampler` owns the CPU, RAM and GPU counters, so the handler just publishes the
 /// cached snapshot. `Snapshot::to_json` fixes the key order.
+///
+/// `gpu_status` explains absent counters to the dashboard's driver hint. The probe closure is
+/// lazy and cached: an available GPU answers `"ok"` without scanning PCI, and on Windows the
+/// PowerShell query runs once per process, on the first poll that finds no NVML.
 pub async fn hardware(State(st): State<AppState>) -> Json<Value> {
-    Json(st.hw.snapshot().await.to_json())
+    let snap = st.hw.snapshot().await;
+    let status = crate::hw::gpu_status(snap.gpu.is_some(), crate::hw::nvidia_present);
+    Json(snap.to_json(status))
 }
 
 /// `GET /api/history`: the most recent sixty rows, oldest-first. A failed read is a runtime
@@ -128,15 +141,16 @@ pub async fn get_profile(State(st): State<AppState>) -> Result<Json<Value>, AppE
     // The GPU block is all-or-nothing: the profile fields are assembled in one shot, so any
     // failed NVML query emits `gpu_error` alone, never a partial `gpu`/`gpu_vram_gb`/
     // `gpu_driver` trio. `available()` is that flag, and "None detected" is the fallback name.
-    let (gpu, gpu_vram_gb, gpu_driver, gpu_error) = if !st.gpu.available() {
+    let gpu_now = st.gpu.current();
+    let (gpu, gpu_vram_gb, gpu_driver, gpu_error) = if !gpu_now.available() {
         (Some("None detected".to_string()), None, None, None)
     } else {
-        match (st.gpu.name(), st.gpu.vram_gb(), st.gpu.driver()) {
+        match (gpu_now.name(), gpu_now.vram_gb(), gpu_now.driver()) {
             (Some(name), Some(vram), Some(driver)) => (Some(name), Some(vram), Some(driver), None),
             // The trait reports a missing field, not the NVML error text, so the wording is
             // generic here; the values still surface what the driver could report.
             _ => (None, None, None,
-                  Some(st.gpu.error().unwrap_or_else(|| "NVML query failed".into()))),
+                  Some(gpu_now.error().unwrap_or_else(|| "NVML query failed".into()))),
         }
     };
     let out = ProfileOut {

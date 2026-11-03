@@ -75,6 +75,11 @@
   .status-box .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); flex: none; }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; margin-bottom: 24px; }
+  /* Shown only while /api/hardware reports no GPU counters. The server retries NVML every
+     ten seconds, so installing the driver and reloading the page engages GPU metrics. */
+  .gpu-hint { margin: -10px 0 24px; padding: 10px 14px; text-align: center; font-size: 0.8rem; color: var(--muted); background: var(--card); border: 1px dashed var(--border); border-radius: 10px; }
+  .gpu-hint a { color: var(--accent); text-decoration: none; }
+  .gpu-hint a:hover { text-decoration: underline; }
   .card {
     background: var(--card);
     backdrop-filter: blur(12px);
@@ -283,6 +288,14 @@
   <div class="card accent"><div class="label">Last tok/s</div><div class="value" id="lasttps">--</div><div class="sub">tokens / second</div></div>
 </div>
 
+<div class="gpu-hint" id="gpuHint" hidden>
+  <span id="gpuHintText"></span>
+  <span id="gpuHintLinks" hidden>
+    <a href="https://www.nvidia.com/en-us/drivers/" target="_blank" rel="noopener noreferrer">Windows driver</a> ·
+    <a href="https://www.nvidia.com/en-us/drivers/unix/" target="_blank" rel="noopener noreferrer">Linux driver</a>
+  </span>
+</div>
+
 <div class="panel">
   <div class="section-title">Run benchmark <span class="badge">POST /api/test</span></div>
   <div class="controls">
@@ -392,7 +405,7 @@
     <p>A web dashboard for benchmarking and monitoring local LLM servers — LM Studio, Ollama, Moderado Gateway, or any OpenAI-compatible endpoint. Run single benchmarks, fan out stress tests, and page through a dated run history that survives restarts.</p>
     <p>Axum and SQLite under the hood, with this dashboard embedded in a single binary.</p>
     <div class="about-meta">
-      <span>Version 0.1.0</span>
+      <span>Version <span id="appVersion"></span></span>
       <span>MIT License</span>
       <a href="https://github.com/marcuz-apl/lomora.git" target="_blank" rel="noopener noreferrer">GitHub repository</a>
     </div>
@@ -471,6 +484,25 @@ function refreshModelChart(){
   modelChart.update();
 }
 
+// What "no GPU counters" means, keyed by the server's gpu_status. The server probes the PCI
+// vendor only while NVML is missing, so the hint can tell a card without a driver (the links
+// help) from a machine without a card (they would not). CUDA is never suggested: NVML ships
+// with the display driver, not the toolkit.
+const GPU_HINTS = {
+  driver_missing: 'An NVIDIA GPU is present, but its driver is not loaded. Install or update the NVIDIA driver, then reload this page:',
+  unknown: 'GPU metrics come from the NVIDIA driver, which Lomora does not bundle. Install or update it, then reload this page:',
+  no_nvidia: 'No NVIDIA GPU found — GPU metrics require an NVIDIA card with its driver installed.',
+  unsupported: 'GPU metrics are not available on macOS: NVIDIA no longer ships drivers for current macOS.',
+};
+const GPU_HINT_LINKS = new Set(['driver_missing', 'unknown']);
+function renderGpuHint(status){
+  const box = document.getElementById('gpuHint');
+  if (!status || status === 'ok') { box.hidden = true; return; }
+  document.getElementById('gpuHintText').textContent = GPU_HINTS[status] || GPU_HINTS.unknown;
+  document.getElementById('gpuHintLinks').hidden = !GPU_HINT_LINKS.has(status);
+  box.hidden = false;
+}
+
 async function loadHardware(){
   try {
     const d = await fetch('/api/hardware').then(r=>r.json());
@@ -488,6 +520,7 @@ async function loadHardware(){
       document.getElementById('gpumem-sub').textContent = 'no GPU';
       document.getElementById('gputemp').textContent = 'N/A';
     }
+    renderGpuHint(d.gpu_status || (d.gpu_util !== undefined ? 'ok' : 'unknown'));
   } catch(e){ console.error(e); }
 }
 
@@ -900,6 +933,17 @@ document.getElementById('aboutDialog').addEventListener('click', (e) => {
   if (e.target === e.currentTarget) e.currentTarget.close();
 });
 
+// The About dialog's version comes from the server, which reads it out of the manifest at
+// build time. Keeping it out of the page means a release bumps exactly one file.
+async function loadVersion(){
+  try {
+    const v = await (await fetch('/api/version')).json();
+    document.getElementById('appVersion').textContent = v.version || '';
+  } catch {
+    // The dialog simply renders no number; a wrong number would be worse.
+  }
+}
+
 loadHardware();
 loadHistory();
 loadChart();
@@ -907,6 +951,7 @@ document.getElementById('ftrYear').textContent = new Date().getFullYear();
 loadModels();
 loadPrompts();
 loadProfile();
+loadVersion();
 setInterval(loadHardware, 3000);
 </script>
 </body>

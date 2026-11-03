@@ -2,12 +2,21 @@
 
 A web dashboard for benchmarking and monitoring local LLM servers — LM Studio, Ollama, Moderado Gateway, or any OpenAI-compatible endpoint. Run single benchmarks, fan out stress tests, and browse a dated run history that survives restarts. The dashboard, the API, and the SQLite store ship in a single Rust binary; no interpreter or runtime is required.
 
-## Requirements
+## Download
 
-- Rust toolchain (stable; tested with 1.97)
-- (Optional) NVIDIA GPU with a driver exposing NVML for GPU metrics
+Grab the binary for your platform from [Releases](https://github.com/marcuz-apl/lomora/releases/latest) and run it — no toolchain needed, the dashboard is embedded in the executable.
 
-## Getting Started
+| Platform | Asset | First-run note |
+|---|---|---|
+| Windows x86_64 | `lomora-windows-x86_64.exe` | SmartScreen warns once about the unsigned binary: *More info* → *Run anyway*. |
+| Linux x86_64 | `lomora-linux-x86_64` | `chmod +x lomora-linux-x86_64` before running. |
+| macOS (Apple Silicon) | `lomora-macos-aarch64` | `chmod +x`, then right-click → *Open* the first time. |
+
+Run it from a folder of its own — the database is created at `data/lomora.db` beside the working directory, and `PORT` / `LOMORA_DB` override the defaults — then open http://localhost:8501. GPU metrics need an NVIDIA driver exposing NVML (`nvml.dll` on Windows, `libnvidia-ml.so` on Linux); machines without one, including Apple Silicon Macs, report CPU and RAM only, and the dashboard explains why and links the driver download when a card is present.
+
+## Build from source
+
+Requirements: Rust stable (tested with 1.97), and optionally an NVIDIA driver exposing NVML for GPU metrics (a local LM Studio on the default endpoint http://localhost:1234 is optional too).
 
 1. Clone the repository
 
@@ -22,15 +31,7 @@ A web dashboard for benchmarking and monitoring local LLM servers — LM Studio,
    cargo run --release
    ```
 
-   The release executable is written to `target/release/lomora` (`lomora.exe` on Windows). It embeds the dashboard, so it runs on its own.
-
-3. (Optional) Start LM Studio and load a model (default endpoint http://localhost:1234).
-
-4. Open your browser and visit
-
-   ```
-   http://localhost:8501
-   ```
+   The release executable is written to `target/release/lomora` (`lomora.exe` on Windows) and embeds the dashboard, so it runs on its own. Open http://localhost:8501 once it starts.
 
 Run history is stored in a local SQLite database (`data/lomora.db` by default, created on first start) and, like the system profile, survives restarts. The dashboard lists runs newest-first with full `YYYY-MM-DD HH:MM:SS` timestamps and pages through the whole dataset (10 rows per page) via `GET /api/history?limit=&offset=`, which reports the total count in `X-Total-Runs`. Each row carries a ✕ button that deletes exactly that record (`DELETE /api/history/{id}`). Rows written before the date became part of the timestamp are dated once at startup from their stored creation time.
 
@@ -48,7 +49,7 @@ The stress card fans `requests` completions (1-500) out behind a semaphore of `c
 
 ### HTTP API
 
-`GET /api/hardware`, `GET /api/models`, `GET|POST /api/profile`, `GET /api/history` (`?limit=&offset=`), `DELETE /api/history/{id}`, `POST /api/test`, `POST /api/stress`, `GET /api/prompts`, `POST /api/prompts/fetch`.
+`GET /api/hardware` (its `gpu_status` says why GPU counters are missing: `ok`, `driver_missing`, `no_nvidia`, `unsupported` or `unknown`), `GET /api/version`, `GET /api/models`, `GET|POST /api/profile`, `GET /api/history` (`?limit=&offset=`), `DELETE /api/history/{id}`, `POST /api/test`, `POST /api/stress`, `GET /api/prompts`, `POST /api/prompts/fetch`.
 
 ### Configuration
 
@@ -65,7 +66,7 @@ All settings come from environment variables:
 
 When a request carries no `base_url`, the base URL is resolved in this order: `LMSTUDIO_URL`, then `OLLAMA_URL`, then `http://localhost:1234`.
 
-GPU metrics need an NVIDIA driver that exposes NVML (`nvidia-smi`). Without one the GPU counters are omitted and the profile reports `gpu: "None detected"`; every other feature keeps working.
+GPU metrics need an NVIDIA driver that exposes NVML (`nvidia-smi`). Without one the GPU counters are omitted, the profile reports `gpu: "None detected"`, and the dashboard explains why: if a best-effort PCI/PNP probe still finds an NVIDIA card, the hint links the Windows and Linux driver downloads; otherwise it says no NVIDIA card is present, or that macOS is unsupported. Every other feature keeps working. NVML is re-detected every ten seconds while it is missing, so installing the driver and reloading the page is enough — no process restart. The CUDA toolkit is not needed: NVML ships with the display driver.
 
 ## Development
 

@@ -11,16 +11,16 @@ use crate::store::Db;
 
 #[derive(Clone)]
 pub struct AppState { pub cfg: Arc<Config>, pub hw: crate::hw::Sampler, pub http: reqwest::Client,
-                      pub db: Db, pub sys: crate::hw::ProfileStatic, pub gpu: Arc<dyn crate::hw::Gpu> }
+                      pub db: Db, pub sys: crate::hw::ProfileStatic, pub gpu: crate::hw::GpuHandle }
 
 impl AppState {
     /// The single construction path. Every field is wired here and nowhere else, because
     /// `main.rs`, `spawn_app`, and `fresh_app` all go through this function. `db` is the SQLite
-    /// store, `sys` the profile facts captured once at startup, and `gpu` the same handle the
-    /// sampler samples — so the profile endpoint can report the card's own fields without
-    /// opening NVML a second time.
+    /// store, `sys` the profile facts captured once at startup, and `gpu` the shared GPU slot
+    /// the sampler reads — one handle, so a card detected after startup is visible to both the
+    /// hardware snapshot and the profile endpoint.
     pub fn new(cfg: Config, hw: crate::hw::Sampler, http: reqwest::Client,
-               db: Db, sys: crate::hw::ProfileStatic, gpu: Arc<dyn crate::hw::Gpu>) -> AppState {
+               db: Db, sys: crate::hw::ProfileStatic, gpu: crate::hw::GpuHandle) -> AppState {
         AppState { cfg: Arc::new(cfg), hw, http, db, sys, gpu }
     }
 }
@@ -37,6 +37,7 @@ pub fn build_router(state: AppState) -> Router {
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
     Router::new()
         .route("/api/hardware", get(crate::routes::hardware))
+        .route("/api/version", get(crate::routes::version))
         .route("/api/models", get(crate::routes::list_models))
         .route("/api/profile", get(crate::routes::get_profile).post(crate::routes::set_profile))
         .route("/api/history", get(crate::routes::get_history))
