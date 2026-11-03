@@ -43,6 +43,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/history", get(crate::routes::get_history))
         .route("/api/test", post(crate::routes::run_test))
         .route("/api/stress", post(crate::routes::stress_test))
+        .route("/api/prompts", get(crate::routes::get_prompts))
+        .route("/api/prompts/fetch", post(crate::routes::fetch_prompts))
         .fallback(fallback)
         .layer(cors)
         .with_state(state)

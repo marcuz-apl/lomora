@@ -245,6 +245,43 @@ pub async fn stress_test(State(st): State<AppState>, body: Bytes) -> Response {
     Json(out).into_response()
 }
 
+/// `GET /api/prompts`: the dashboard's question pool — the built-in 18 plus whatever a previous
+/// fetch cached in SQLite, built-in entries first so the picker's order is stable across
+/// restarts. A store failure stays an error envelope (`?` → `AppError`, the same 200-envelope
+/// rule profile and history follow): serving "just the built-ins" would silently hide a broken
+/// database, and the UI would report a healthy pool that silently shrinks.
+pub async fn get_prompts(State(st): State<AppState>) -> Result<Json<Value>, AppError> {
+    let fetched = st.db.list_prompts().await?;
+    let pool = crate::prompts::merge(crate::prompts::built_in(), fetched);
+    Ok(Json(json!({
+        "defaults": crate::prompts::defaults(),
+        "pool": pool.iter()
+            .map(|q| json!({ "category": q.category, "text": q.text }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// `POST /api/prompts/fetch`: sample questions from every configured benchmark source and
+/// REPLACE the cached set (re-fetching re-draws the sample rather than piling up rows). All
+/// sources failing is a runtime failure — the 200 error envelope, pool untouched — while a
+/// partial failure succeeds and names the dead sources in `failed`, so the UI can show what
+/// was skipped. A fetch that lands nothing also never wipes the existing cache: the
+/// `replace_prompts` write only happens on the success path.
+pub async fn fetch_prompts(State(st): State<AppState>) -> Result<Json<Value>, AppError> {
+    let (mut got, failed) = crate::prompts::fetch_all(&st.http, &st.cfg.prompts_sources).await;
+    if got.is_empty() {
+        let detail = failed.iter().map(|(c, e)| format!("{c}: {e}")).collect::<Vec<_>>()
+            .join("; ");
+        return Err(AppError(format!("question fetch failed ({detail})")));
+    }
+    got.truncate(crate::prompts::MAX_FETCHED);
+    let added = got.len();
+    let failed: Vec<Value> = failed.iter()
+        .map(|(c, e)| json!({ "category": c, "error": e })).collect();
+    st.db.replace_prompts(&got).await?;
+    Ok(Json(json!({ "added": added, "failed": failed })))
+}
+
 /// The whole probe against `base`, no Axum types: the same two upstream calls as Python —
 /// a streaming one-token TTFT probe (60 s) and a full non-streaming completion (300 s) whose
 /// `usage.completion_tokens / elapsed` is the token rate. Returns the wire value and the row

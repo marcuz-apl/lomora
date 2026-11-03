@@ -39,6 +39,19 @@ endpoints, the same JSON shapes, and the unchanged `static/index.html` dashboard
 Run history is stored in a local SQLite database (`lomora.db` by default). The dashboard
 shows the most recent 60 runs, and both history and the system profile survive restarts.
 
+### Benchmark question pool
+
+The dashboard ships 18 built-in benchmark questions across five categories (reasoning,
+math, coding, knowledge, instruction). Three of them are the defaults behind the
+"Run 3 defaults" button, which fires them back-to-back as three separate history rows.
+A dropdown next to the prompt box picks any pool question, and "Fetch more" samples up
+to 8 questions per source from real benchmark datasets — GSM8K (math), HumanEval
+(coding, gzipped), TruthfulQA (knowledge) — caching them in SQLite and replacing the
+previously fetched set on each run. If every source is unreachable, the fetch reports an
+error and the existing pool stays untouched. Point `LOMORA_PROMPTS_URLS` at your own
+`category=url` sources to fetch from anything that serves JSONL, a JSON array, or their
+gzip variants, with `question`, `prompt`, or `text` as the text field.
+
 ### Configuration
 
 All settings come from environment variables:
@@ -50,6 +63,7 @@ All settings come from environment variables:
 | `OLLAMA_URL`    | `http://localhost:11434` | Fallback base URL when `LMSTUDIO_URL` is unset.                   |
 | `LOMORA_DB`     | `lomora.db`              | SQLite file for run history and the saved profile.                |
 | `LOMORA_STATIC` | *(embedded)*             | Serve the UI from this directory instead of the embedded copy.    |
+| `LOMORA_PROMPTS_URLS` | *(built-in set)*   | Question-pool fetch sources as `category=url` pairs, comma-separated (e.g. `math=https://…/test.jsonl,coding=https://…/data.json.gz`). |
 
 When a request carries no `base_url`, the base URL is resolved in this order:
 `LMSTUDIO_URL`, then `OLLAMA_URL`, then `http://localhost:1234`.

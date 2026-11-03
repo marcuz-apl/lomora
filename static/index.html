@@ -174,6 +174,16 @@
     <div class="field"><label>Model</label><input class="model" id="model" value="local-model" list="models"></div>
     <datalist id="models"></datalist>
     <div class="field"><label>Prompt</label><input class="prompt" id="prompt" value="Count from 1 to 20, one number per line."></div>
+    <div class="field" style="min-width:340px;"><label>Question pool</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <select id="promptPool" onchange="pickPrompt()" style="background:rgba(10,13,20,0.6);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:10px 14px;font-size:.9rem;font-family:inherit;flex:1;min-width:200px;">
+          <option value="">-- pick a question --</option>
+        </select>
+        <button id="defaultsBtn" onclick="runDefaults()" style="padding:10px 14px;"><span class="spinner"></span><span class="btn-label">Run 3 defaults</span></button>
+        <button id="fetchBtn" onclick="fetchPrompts()" style="padding:10px 14px;"><span class="spinner"></span><span class="btn-label">Fetch more</span></button>
+      </div>
+      <div class="err" id="poolStatus" style="margin-top:6px;"></div>
+    </div>
     <div class="field"><label>Max tokens</label><input class="maxtok" id="maxtok" type="number" value="100" min="1" max="2048"></div>
     <button id="runBtn" onclick="runTest()"><span class="spinner"></span><span class="btn-label">Run Test</span></button>
   </div>
@@ -371,7 +381,10 @@ async function runStress(){
   }
 }
 
-async function runTest(){
+async function runTest(force){
+  // While runDefaults drives the prompt box, manual clicks are ignored — but the queue's own
+  // calls pass force=true, otherwise the guard would no-op every run of the sequence itself.
+  if (window._queueRunning && !force) return;
   const btn = document.getElementById('runBtn');
   const err = document.getElementById('err');
   const status = document.getElementById('status');
@@ -395,13 +408,108 @@ async function runTest(){
     err.textContent = String(e);
     status.textContent='Error';
   } finally {
-    btn.disabled=false; btn.classList.remove('loading');
+    btn.disabled = window._queueRunning === true; btn.classList.remove('loading');
+  }
+}
+
+// ── Question pool ─────────────────────────────────────────────────────────────
+// Escape everything that came from the pool: fetched questions are network data, and one
+// dataset line with "<script>" in it must not become markup.
+function esc(s){ return String(s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+let poolDefaults = [];
+
+async function loadPrompts(){
+  try {
+    const v = await fetch('/api/prompts').then(r=>r.json());
+    if (v.error){ document.getElementById('poolStatus').textContent = v.error; return; }
+    poolDefaults = v.defaults || [];
+    const sel = document.getElementById('promptPool');
+    const prev = sel.value;
+    const groups = {};
+    for (const q of v.pool) (groups[q.category] = groups[q.category] || []).push(q);
+    const label = t => t.length > 90 ? t.slice(0, 89) + '…' : t;
+    sel.innerHTML = '<option value="">-- pick a question --</option>' +
+      Object.entries(groups).map(([cat, qs]) =>
+        `<optgroup label="${esc(cat)}">` +
+        qs.map(q => `<option value="${esc(q.text)}">${esc(label(q.text))}</option>`).join('') +
+        '</optgroup>').join('');
+    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  } catch(e){ document.getElementById('poolStatus').textContent = String(e); }
+}
+
+function pickPrompt(){
+  const v = document.getElementById('promptPool').value;
+  if (v){
+    document.getElementById('prompt').value = v;
+    document.getElementById('prompt').focus();
+  }
+}
+
+async function fetchPrompts(){
+  const btn = document.getElementById('fetchBtn');
+  const st = document.getElementById('poolStatus');
+  st.textContent = '';
+  btn.disabled = true; btn.classList.add('loading');
+  try {
+    const d = await fetch('/api/prompts/fetch', {method:'POST'}).then(r=>r.json());
+    if (d.error){ st.textContent = d.error; return; }
+    await loadPrompts();
+    let msg = `Fetched ${d.added} questions`;
+    if (d.failed && d.failed.length) msg += ` (${d.failed.map(f=>f.category).join(', ')} unavailable)`;
+    st.textContent = msg;
+  } catch(e){ st.textContent = String(e); }
+  finally { btn.disabled = false; btn.classList.remove('loading'); }
+}
+
+// Fire the three default questions back-to-back, each a full run and its own history row.
+// The prompt box is restored afterwards; Run Test is locked out while the queue drives it
+// (_queueRunning), since each runTest() call would otherwise re-enable it mid-sequence.
+async function runDefaults(){
+  const btn = document.getElementById('defaultsBtn');
+  const runBtn = document.getElementById('runBtn');
+  const st = document.getElementById('poolStatus');
+  if (window._queueRunning) return;
+  st.textContent = '';
+  let defaults = poolDefaults;
+  if (!defaults.length){
+    try {
+      const v = await fetch('/api/prompts').then(r=>r.json());
+      if (v.error){ st.textContent = v.error; return; }
+      defaults = v.defaults || [];
+    } catch(e){ st.textContent = String(e); return; }
+  }
+  if (!defaults.length){ st.textContent = 'No default questions configured'; return; }
+  const original = document.getElementById('prompt').value;
+  window._queueRunning = true;
+  btn.disabled = true; runBtn.disabled = true;
+  btn.classList.add('loading');
+  const label = btn.querySelector('.btn-label');
+  let ok = 0;
+  try {
+    for (let i = 0; i < defaults.length; i++){
+      label.textContent = `Running ${i+1}/${defaults.length}…`;
+      document.getElementById('prompt').value = defaults[i];
+      await runTest(true);
+      if (!document.getElementById('err').textContent) ok++;
+    }
+    st.textContent = `Defaults finished: ${ok}/${defaults.length} runs recorded`;
+  } catch(e){
+    st.textContent = String(e);
+  } finally {
+    document.getElementById('prompt').value = original;
+    window._queueRunning = false;
+    btn.disabled = false; runBtn.disabled = false;
+    btn.classList.remove('loading');
+    label.textContent = 'Run 3 defaults';
   }
 }
 
 loadHardware();
 loadHistory();
 loadModels();
+loadPrompts();
 loadProfile();
 setInterval(loadHardware, 3000);
 </script>

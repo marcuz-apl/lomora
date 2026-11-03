@@ -47,6 +47,29 @@ pub async fn fresh_app_on_db(mock: &str, path: &std::path::Path)
     spawn_app_with(cfg, lomora::store::Db::open(path).expect("test database")).await
 }
 
+/// A fully caller-built `Config` over an in-memory database — for tests that configure a whole
+/// subsystem (the prompt pool's sources) without touching the process environment.
+pub async fn fresh_app_cfg(cfg: lomora::config::Config) -> (String, tokio::task::JoinHandle<()>) {
+    spawn_app_with(cfg, lomora::store::Db::in_memory()).await
+}
+
+/// `fresh_app_cfg` over a real file, so the prompt-cache restart test can open the same path twice.
+pub async fn fresh_app_cfg_on_db(cfg: lomora::config::Config, path: &std::path::Path)
+    -> (String, tokio::task::JoinHandle<()>)
+{
+    spawn_app_with(cfg, lomora::store::Db::open(path).expect("test database")).await
+}
+
+/// A caller-built router on an ephemeral port — for mocks that need several routes with
+/// caller-chosen bodies (the multi-format benchmark-source mock), which the fixed mocks in
+/// `src/mock.rs` cannot express.
+pub async fn spawn_router(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    (format!("http://{addr}"), handle)
+}
+
 async fn spawn_app_with(cfg: lomora::config::Config, db: lomora::store::Db)
     -> (String, tokio::task::JoinHandle<()>)
 {

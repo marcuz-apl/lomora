@@ -6,5 +6,6 @@ pub mod error;
 pub mod hw;
 pub mod mock;
 pub mod models;
+pub mod prompts;
 pub mod routes;
 pub mod store;

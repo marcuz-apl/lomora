@@ -55,7 +55,10 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS profile (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   name TEXT NOT NULL DEFAULT 'My workstation', notes TEXT NOT NULL DEFAULT '');
-INSERT OR IGNORE INTO profile (id, name, notes) VALUES (1, 'My workstation', '');";
+INSERT OR IGNORE INTO profile (id, name, notes) VALUES (1, 'My workstation', '');
+CREATE TABLE IF NOT EXISTS prompts (
+  id INTEGER PRIMARY KEY, category TEXT NOT NULL, text TEXT NOT NULL,
+  created_at TEXT NOT NULL);";
 
 /// A `BEFORE UPDATE` trigger that aborts every write to the `profile` row while reads and the
 /// seeded default keep working. Used only by `Db::profile_writes_fail_for_tests`.
@@ -167,6 +170,35 @@ impl Db {
             if let Some(v) = notes { g.execute("UPDATE profile SET notes = ?1 WHERE id = 1", params![v])?; }
         }   // the guard drops here: it is never held across the `await` below
         self.profile().await
+    }
+
+    /// The fetched-question cache, written by `POST /api/prompts/fetch`. A fetch REPLACES the
+    /// whole set (one transaction: delete, then insert) rather than appending, so repeated
+    /// fetches never accumulate duplicates; the built-in pool lives in code, not here.
+    pub async fn replace_prompts(&self, items: &[crate::prompts::Question]) -> anyhow::Result<()> {
+        let created = chrono::Local::now().to_rfc3339();
+        let c = self.0.clone(); let g = c.lock().await;
+        let tx = g.unchecked_transaction()?;
+        tx.execute("DELETE FROM prompts", [])?;
+        {
+            let mut stmt = tx.prepare("INSERT INTO prompts (category, text, created_at) VALUES (?1, ?2, ?3)")?;
+            for q in items {
+                stmt.execute(params![q.category, q.text, created])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The cached fetched questions, oldest first (`ORDER BY id`): `GET /api/prompts` merges
+    /// them behind the built-in pool in exactly this order.
+    pub async fn list_prompts(&self) -> anyhow::Result<Vec<crate::prompts::Question>> {
+        let c = self.0.clone(); let g = c.lock().await;
+        let mut stmt = g.prepare("SELECT category, text FROM prompts ORDER BY id")?;
+        let rows = stmt.query_map([], |row| Ok(crate::prompts::Question {
+            category: row.get(0)?, text: row.get(1)?,
+        }))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 

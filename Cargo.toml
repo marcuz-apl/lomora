@@ -36,6 +36,9 @@ anyhow = "1"
 # `serde` feature: nothing serializes a chrono value — every timestamp leaves the crate as a
 # string that is formatted before it reaches SQL or JSON.
 chrono = "0.4.45"
+# Decompresses HumanEval's `HumanEval.jsonl.gz` (the prompt fetcher's coding source) and nothing
+# else. The default `miniz_oxide` backend keeps it pure Rust, no C toolchain.
+flate2 = "1"
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["full"] }

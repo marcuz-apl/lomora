@@ -7,6 +7,9 @@ pub struct Config {
     pub port: u16,
     pub db_path: PathBuf,
     pub static_dir: Option<PathBuf>,
+    /// `(category, url)` pairs the question fetcher samples from; `LOMORA_PROMPTS_URLS`
+    /// overrides the built-in benchmark set (`category=url` pairs, comma-separated).
+    pub prompts_sources: Vec<(String, String)>,
 }
 
 /// Trailing-slash strip, mirroring `os.getenv(...).rstrip("/")` in main.py.
@@ -31,6 +34,41 @@ fn env_or(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+/// The three built-in benchmark sources, one per question family. Each URL was fetched and its
+/// format confirmed before being baked in (2026-11-03): GSM8K is newline-delimited
+/// `{"question", "answer"}`, HumanEval is a gzipped JSONL of `{"prompt", …}`, TruthfulQA's
+/// `mc_task.json` is a JSON array of objects with a `question` field.
+pub fn default_prompts_sources() -> Vec<(String, String)> {
+    vec![
+        ("math".into(),
+         "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl".into()),
+        ("coding".into(),
+         "https://raw.githubusercontent.com/openai/human-eval/master/data/HumanEval.jsonl.gz".into()),
+        ("knowledge".into(),
+         "https://raw.githubusercontent.com/sylinrl/TruthfulQA/main/data/mc_task.json".into()),
+    ]
+}
+
+/// `LOMORA_PROMPTS_URLS` grammar: `category=url` pairs, comma-separated, whitespace trimmed.
+/// Segments without an `=` are skipped, and an env value that parses to nothing falls back to
+/// the built-in sources — a mistyped override must not silently disable the fetcher. Pure so it
+/// is testable without touching the process environment.
+pub fn parse_prompts_sources(env: Option<&str>) -> Vec<(String, String)> {
+    let Some(raw) = env.map(str::trim).filter(|v| !v.is_empty()) else {
+        return default_prompts_sources();
+    };
+    let pairs: Vec<(String, String)> = raw.split(',')
+        .filter_map(|seg| {
+            let seg = seg.trim();
+            let (cat, url) = seg.split_once('=')?;
+            let (cat, url) = (cat.trim(), url.trim());
+            if cat.is_empty() || url.is_empty() { return None; }
+            Some((cat.to_string(), url.to_string()))
+        })
+        .collect();
+    if pairs.is_empty() { default_prompts_sources() } else { pairs }
+}
+
 /// The server-side default when a request omits `base_url`: an explicit `LMSTUDIO_URL` wins,
 /// then an explicit `OLLAMA_URL`, then LM Studio's conventional address. The dashboard always
 /// sends an explicit `base_url` (the provider dropdown hardcodes both URLs in the page), so
@@ -51,6 +89,8 @@ impl Config {
             db_path: PathBuf::from(env_or("LOMORA_DB", "lomora.db")),
             static_dir: std::env::var("LOMORA_STATIC").ok()
                 .filter(|v| !v.trim().is_empty()).map(PathBuf::from),
+            prompts_sources: parse_prompts_sources(
+                std::env::var("LOMORA_PROMPTS_URLS").ok().as_deref()),
         }
     }
 }
@@ -87,7 +127,25 @@ mod tests {
             port: 0,
             db_path: PathBuf::from("x.db"),
             static_dir: None,
+            prompts_sources: Vec::new(),
         }
+    }
+
+    // The env grammar for LOMORA_PROMPTS_URLS: `category=url` pairs, comma-separated; junk
+    // segments are skipped; nothing (or nothing valid) falls back to the built-in benchmark set.
+    #[test]
+    fn prompts_sources_env_grammar() {
+        use super::parse_prompts_sources;
+        let two = parse_prompts_sources(Some(" math=http://a/1 , coding=http://b/2 "));
+        assert_eq!(two, vec![("math".into(), "http://a/1".into()),
+                             ("coding".into(), "http://b/2".into())]);
+        // An item-level "category" field can override the source category on the wire; the
+        // parser only needs to carry the source's fallback.
+        let custom = parse_prompts_sources(Some("trivia=http://c/3,broken,=http://d/4"));
+        assert_eq!(custom, vec![("trivia".into(), "http://c/3".into())]);
+        assert_eq!(parse_prompts_sources(None), super::default_prompts_sources());
+        assert_eq!(parse_prompts_sources(Some("  ")), super::default_prompts_sources());
+        assert_eq!(parse_prompts_sources(Some("noequals,=x")), super::default_prompts_sources());
     }
 
     #[test]
