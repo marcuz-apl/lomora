@@ -42,10 +42,15 @@ async fn all_succeed_against_the_mock_and_keys_follow_declaration_order() {
     assert_eq!(v["errors"], 0);
     assert_eq!(v["error_samples"], json!([]));
     assert_eq!(v["total_tokens"], 240);
-    // Measured, so only the shape and the invariant are pinned.
-    assert!(v["wall_s"].as_f64().unwrap() > 0.0, "{v}");
-    assert!(v["avg_latency_s"].as_f64().unwrap() > 0.0, "{v}");
-    assert!(v["p95_latency_s"].as_f64().unwrap() > 0.0, "{v}");
+    // Measured, so only the shape and the invariants are pinned. Every latency is rounded
+    // (`wall_s` at 2 places, `avg`/`p95` at 3) and the mock answers over loopback in about a
+    // millisecond, so a fast runner may legitimately report 0.0 — including a 0.0 wall for a
+    // sub-5 ms fan-out. The rates divide by the raw wall clock, so they stay positive even when
+    // the reported `wall_s` quantises away.
+    for field in ["wall_s", "avg_latency_s", "p95_latency_s"] {
+        let n = v[field].as_f64().unwrap_or_else(|| panic!("{field} must be a number: {v}"));
+        assert!(n >= 0.0, "{v}");
+    }
     assert!(v["agg_tok_per_s"].as_f64().unwrap() > 0.0, "{v}");
     assert!(v["req_per_s"].as_f64().unwrap() > 0.0, "{v}");
     // The per-field rounding rules are pinned exactly in `bench::agg_tests`; here only the

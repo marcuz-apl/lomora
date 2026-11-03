@@ -14,7 +14,9 @@ jobs:
     name: Build and test (${{ matrix.asset }})
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: true
+      # Every platform reports its own result: with fail-fast, one red job cancels the
+      # others mid-build and their "failure" says nothing about their code.
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
