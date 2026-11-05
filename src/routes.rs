@@ -405,7 +405,7 @@ async fn probe(req: &TestReq, cfg: &Config, http: &reqwest::Client)
         id: 0,
         kind: "single".into(), timestamp: out.timestamp.clone(), model: out.model.clone(),
         max_tokens: out.max_tokens, ttft_ms: out.ttft_ms, total_s: out.total_s,
-        tokens: out.tokens, tok_per_s: out.tok_per_s, concurrency: None, base_url: None };
+        tokens: out.tokens, tok_per_s: out.tok_per_s, concurrency: None, base_url: Some(base) };
     let value = serde_json::to_value(&out)
         .map_err(|e| AppError(format!("failed to serialize the test result: {e}")))?;
     Ok((value, row))

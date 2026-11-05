@@ -570,7 +570,7 @@ async function loadHistory(){
     histTotal = Number(r.headers.get('x-total-runs')) || h.length;
     const pages = Math.max(1, Math.ceil(histTotal / HIST_PAGE));
     const tbody = document.getElementById('tbody');
-    if (!h.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr>'; }
+    if (!h.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr>'; }
     else { tbody.innerHTML = ''; h.forEach(addRow); }
     document.getElementById('histCount').textContent = `${histTotal} run${histTotal===1?'':'s'}`;
     document.getElementById('histPageInfo').textContent =

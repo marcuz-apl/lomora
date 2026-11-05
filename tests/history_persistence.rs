@@ -35,6 +35,29 @@ async fn rows_appear_oldest_first_with_eight_keys_id_first() {
             obj["timestamp"]);
 }
 
+/// `provider` is never stored: `RunRow::to_history_json` derives it from `base_url` at
+/// serialization. A single run that discards the resolved upstream therefore reaches the
+/// dashboard as `"provider": null` and renders `—`. The mock's ephemeral port maps to
+/// `Custom`, so the wire value also proves the mapping ran on the persisted URL.
+#[tokio::test]
+async fn single_runs_persist_the_upstream_so_history_carries_a_provider() {
+    let (mock, _m) = spawn_mock().await;
+    let db = lomora::store::Db::in_memory();
+    let (base, _h) = spawn_app_on_db(db.clone()).await;
+    let c = reqwest::Client::new();
+    let r = c.post(format!("{base}/api/test"))
+        .json(&json!({"model": "m", "base_url": mock, "max_tokens": 8}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = c.get(format!("{base}/api/history")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v[0]["provider"], "Custom",
+               "the single-run row must carry the resolved upstream, got {v}");
+    let rows = db.recent_runs(10).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].base_url.as_deref(), Some(mock.as_str()),
+               "the URL itself must reach SQLite, not just the derived label");
+}
+
 /// Deleting one row removes exactly that row — by its database id, not by a (timestamp,
 /// model) guess — and the total that sizes the pager shrinks with it.
 #[tokio::test]
