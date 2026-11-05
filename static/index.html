@@ -301,6 +301,7 @@
   <div class="controls">
     <div class="field"><label>Provider</label>
       <select id="provider" onchange="onProviderChange()" style="background:var(--input-bg);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:10px 14px;font-size:.9rem;font-family:inherit;">
+        <option value="llamacpp">llama.cpp (9931)</option>
         <option value="lmstudio">LM Studio (1234)</option>
         <option value="ollama">Ollama (11434)</option>
         <option value="moderado">Moderado (4788)</option>
@@ -361,8 +362,8 @@
   </div>
   <div class="table-scroll">
     <table>
-      <thead><tr><th>Time</th><th>Model</th><th>Max tokens</th><th>TTFT (ms)</th><th>Total (s)</th><th>Tokens</th><th>tok/s</th><th></th></tr></thead>
-      <tbody id="tbody"><tr><td colspan="8" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr></tbody>
+      <thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>Max tokens</th><th>TTFT (ms)</th><th>Total (s)</th><th>Tokens</th><th>tok/s</th><th></th></tr></thead>
+      <tbody id="tbody"><tr><td colspan="9" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -526,7 +527,7 @@ async function loadHardware(){
 
 function addRow(r){
   const tr = document.createElement('tr');
-  tr.innerHTML = `<td>${r.timestamp}</td><td>${r.model}</td><td>${r.max_tokens}</td><td>${r.ttft_ms ?? '-'}</td><td>${r.total_s}</td><td>${r.tokens}</td><td><strong>${r.tok_per_s}</strong></td>` +
+  tr.innerHTML = `<td>${r.timestamp}</td><td>${r.provider ?? '—'}</td><td>${r.model}</td><td>${r.max_tokens}</td><td>${r.ttft_ms ?? '-'}</td><td>${r.total_s}</td><td>${r.tokens}</td><td><strong>${r.tok_per_s}</strong></td>` +
     `<td class="del"><button title="Delete this run" onclick="deleteRun(${r.id})">&#10005;</button></td>`;
   document.getElementById('tbody').prepend(tr);
 }
@@ -595,16 +596,65 @@ async function loadChart(){
   } catch(e){ console.error(e); }
 }
 
+async function detectActiveModel(provider, base, apiKey){
+  const headers = apiKey ? {'Authorization': 'Bearer ' + apiKey} : {};
+  try {
+    if (provider === 'llamacpp') {
+      const r = await fetch(base + '/models', {headers});
+      if (r.ok) {
+        const j = await r.json();
+        const arr = Array.isArray(j) ? j : (j.data || j.models || []);
+        if (Array.isArray(arr)) {
+          const loaded = arr.find(x => {
+            const st = (x && (x.status && x.status.value)) || x.state || x.status;
+            return String(st || '').toLowerCase() === 'loaded';
+          });
+          if (loaded) return loaded.id || loaded.name || loaded.model || loaded.slug;
+        }
+      }
+    } else if (provider === 'lmstudio') {
+      const r = await fetch(base + '/api/v0/models', {headers});
+      if (r.ok) {
+        const j = await r.json();
+        const arr = Array.isArray(j) ? j : (j.data || j.models || []);
+        if (Array.isArray(arr)) {
+          const loaded = arr.find(x => String(x.state || x.status || '').toLowerCase() === 'loaded');
+          if (loaded) return loaded.id || loaded.name || loaded.model;
+        }
+      }
+    } else if (provider === 'ollama') {
+      const r = await fetch(base + '/api/ps');
+      if (r.ok) {
+        const j = await r.json();
+        const arr = Array.isArray(j) ? j : (j.models || j.data || []);
+        if (Array.isArray(arr) && arr.length) {
+          return arr[0].name || arr[0].model || arr[0].id;
+        }
+      }
+    }
+  } catch(e){ console.error(e); }
+  return null;
+}
+
 async function loadModels(){
   try {
     const base = document.getElementById('baseUrl').value;
+    const provider = document.getElementById('provider').value;
+    const apiKey = document.getElementById('apiKey').value.trim();
     const m = await fetch('/api/models?base_url=' + encodeURIComponent(base)).then(r=>r.json());
     if (Array.isArray(m)) {
+      const ids = [...m].sort((a,b) => String(a).localeCompare(String(b)));
       const dl = document.getElementById('models');
       dl.innerHTML = '';
-      m.forEach(id => { const o=document.createElement('option'); o.value=id; dl.appendChild(o); });
-      if (m.length && (!document.getElementById('model').value || document.getElementById('model').value === 'local-model')) {
-        document.getElementById('model').value = m[0];
+      ids.forEach(id => { const o=document.createElement('option'); o.value=id; dl.appendChild(o); });
+      const active = await detectActiveModel(provider, base, apiKey);
+      const modelEl = document.getElementById('model');
+      if (ids.length && (!modelEl.value || modelEl.value === 'local-model')) {
+        if (active && ids.includes(active)) {
+          modelEl.value = active;
+        } else {
+          modelEl.value = ids[0];
+        }
       }
     }
   } catch(e){ console.error(e); }
@@ -616,6 +666,7 @@ function onProviderChange(){
   if (p === 'lmstudio') base.value = 'http://localhost:1234';
   else if (p === 'ollama') base.value = 'http://localhost:11434';
   else if (p === 'moderado') base.value = 'http://127.0.0.1:4788';
+  else if (p === 'llamacpp') base.value = 'http://127.0.0.1:9931';
   // The old provider's model name is stale the moment the base changes — reset it so
   // loadModels() auto-fills the first model the new provider actually serves (or the
   // placeholder stays if the provider is unreachable).
