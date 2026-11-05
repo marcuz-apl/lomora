@@ -26,6 +26,14 @@ pub struct RunRow {
 #[derive(Debug, Clone)]
 pub struct Profile { pub name: String, pub notes: String }
 
+fn provider_name(base_url: &str) -> &'static str {
+    if base_url.contains(":1234") { "LM Studio" }
+    else if base_url.contains(":11434") { "Ollama" }
+    else if base_url.contains(":4788") { "Moderado" }
+    else if base_url.contains(":9931") { "llama.cpp" }
+    else { "Custom" }
+}
+
 impl RunRow {
     /// A history entry carries the seven wire keys in insertion order, led by `id` — the
     /// database identity the dashboard's per-row delete targets; a (timestamp, model) pair
@@ -37,6 +45,7 @@ impl RunRow {
         serde_json::json!({
             "id": self.id,
             "timestamp": self.timestamp,
+            "provider": self.base_url.as_deref().map(provider_name),
             "model": self.model,
             "max_tokens": self.max_tokens,
             "ttft_ms": self.ttft_ms,

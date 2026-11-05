@@ -25,8 +25,8 @@ async fn rows_appear_oldest_first_with_eight_keys_id_first() {
     assert_eq!(arr[2]["model"], "m2");
     let obj = arr[0].as_object().expect("a history row must be a JSON object");
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-    assert_eq!(keys, ["id", "timestamp", "model", "max_tokens", "ttft_ms", "total_s", "tokens", "tok_per_s"],
-               "the seven wire keys plus the leading `id` the delete button needs");
+    assert_eq!(keys, ["id", "timestamp", "provider", "model", "max_tokens", "ttft_ms", "total_s", "tokens", "tok_per_s"],
+               "the wire keys plus the leading `id` the delete button needs");
     let ids: Vec<i64> = arr.iter().map(|r| r["id"].as_i64().expect("id must be an integer")).collect();
     assert_eq!(ids, vec![1, 2, 3], "insertion order ids, unique per row");
     assert!(obj["timestamp"].as_str().is_some_and(
