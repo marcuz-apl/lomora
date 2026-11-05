@@ -52,6 +52,19 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      # `--hidden` on Unix is a real feature, not a no-op: the launcher re-execs a detached
+      # child, waits for the port, reports, and exits. Only a smoke against the release binary
+      # proves the child outlives the parent and keeps serving.
+      - name: The hidden launcher detaches and leaves a server behind
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          export PORT=18501 LOMORA_DB="$RUNNER_TEMP/lomora-ci.db"
+          ./target/release/lomora --hidden | tee launch.txt
+          grep -q "listening" launch.txt
+          curl --retry 20 --retry-connrefused --retry-delay 1 -fsS "http://127.0.0.1:$PORT/api/version"
+          kill "$(cat "$RUNNER_TEMP/lomora.pid")"
+
       - name: Stage the binary under its release name
         shell: bash
         run: cp "${{ matrix.binary }}" "${{ matrix.asset }}"

@@ -13,7 +13,7 @@ use crate::app::AppState;
 use crate::bench::{SseScanner, from_samples, round_half_even};
 use crate::config::{Config, resolve_base};
 use crate::error::{AppError, ValidationErrors};
-use crate::models::{ProfileOut, ProfileReq, StressOut, StressReq, TestOut, TestReq};
+use crate::models::{ProfileOut, ProfileReq, SqlReq, StressOut, StressReq, TestOut, TestReq};
 use crate::store::RunRow;
 
 /// Truthiness on the optional upstream API key: absent, null, or whitespace-only send no
@@ -331,6 +331,59 @@ pub async fn fetch_prompts(State(st): State<AppState>) -> Result<Json<Value>, Ap
         .map(|(c, e)| json!({ "category": c, "error": e })).collect();
     st.db.replace_prompts(&got).await?;
     Ok(Json(json!({ "added": added, "failed": failed })))
+}
+
+/// What the console answers when `LOMORA_SQL` is off. The wording names the switch because the
+/// dashboard can only report what the server said, and an operator who just saw a refusal needs
+/// the one fact that changes it.
+const SQL_DISABLED: &str =
+    "the SQL console is disabled; start Lomora with LOMORA_SQL=1 to enable it";
+
+/// `POST /api/sql`: run a whole SQL script on the dashboard's database.
+///
+/// The switch is read before the body is parsed — a disabled console refuses without looking at
+/// what it was asked to run. A refusal is the mandated 200 `{"error": …}` rather than a 403: this
+/// API draws its line between malformed requests (422) and runtime failures (200 + `error`), and
+/// "the operator has not enabled this" is a runtime fact about the server, not a bad body. It is
+/// also not a 404: the route exists in every build, so the dashboard can tell the two apart and
+/// keep the toolbox visible.
+///
+/// A statement-level SQLite failure is *output*, carried per statement in `statements[].error`,
+/// and the script stops there; only a store-level failure (the progress handler refusing to
+/// install) rides `AppError`.
+pub async fn run_sql(State(st): State<AppState>, body: Bytes) -> Result<Response, AppError> {
+    if !st.cfg.sql_console {
+        return Ok(Json(json!({ "error": SQL_DISABLED })).into_response());
+    }
+    let req = match ValidationErrors::parse_json_body::<SqlReq>(&body, SqlReq::FIELDS) {
+        Ok(req) => req,
+        Err(v) => return Ok(v.into_response()),
+    };
+    let out = st.db.run_sql(&req.sql, crate::store::SQL_BUDGET).await?;
+    Ok(Json(json!({
+        "statements": out.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
+    })).into_response())
+}
+
+/// `GET /api/sql/backup`: the database as a downloadable file, so an operator can keep a copy
+/// before a `DELETE`. Behind the same switch as the console, and for the same reason: the file
+/// holds every row the console can edit. A success is the raw bytes with an attachment
+/// disposition; a store failure is the usual 200 `{"error": …}` through `AppError`, which the
+/// browser will save as JSON rather than as a database — visible, and honest about what happened.
+pub async fn sql_backup(State(st): State<AppState>) -> Result<Response, AppError> {
+    if !st.cfg.sql_console {
+        return Ok(Json(json!({ "error": SQL_DISABLED })).into_response());
+    }
+    let bytes = st.db.backup_bytes().await?;
+    // A name the operator can sort by: local time to the second, the same stamp the history
+    // table shows. `VACUUM INTO` always produces a file of this shape, so the extension is not a
+    // claim about the reader — it is the one every SQLite tool expects.
+    let name = format!("lomora-{}.db", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream".to_string()),
+         (axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))],
+        bytes,
+    ).into_response())
 }
 
 /// The whole probe against `base`, no Axum types: two upstream calls — a streaming one-token

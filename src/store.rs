@@ -1,6 +1,7 @@
 //! The only module in the crate that knows SQL. `routes.rs` and the benchmark tasks go
 //! through `Db`, which owns the schema, the `runs` rows the history API reads back
-//! oldest-first, and the `profile` singleton row.
+//! oldest-first, and the `profile` singleton row. `Db::run_sql` additionally runs a script the
+//! operator typed, behind the `LOMORA_SQL` switch and its interrupt budget.
 //! One `rusqlite::Connection` behind a `tokio::sync::Mutex` — no connection pool: every
 //! statement here is a single row write or a <60-row read, and the mutex is what keeps
 //! rusqlite's `!Sync`-by-design `Connection` off the async executor's hands.
@@ -82,9 +83,75 @@ const BREAK_PROFILE_UPDATES: &str = "
 CREATE TRIGGER tests_block_profile_updates BEFORE UPDATE ON profile
 BEGIN SELECT RAISE(ABORT, 'profile writes are blocked by the test'); END;";
 
+/// Page size of the raw-SQL console: one statement's `SELECT` never returns more rows than this,
+/// and `truncated` says when the cut happened. The console is a tool for editing rows, not a way
+/// to stream a whole table through the dashboard.
+pub const SQL_MAX_ROWS: usize = 200;
+
+/// The budget one console run gets, across all its statements. SQLite's progress handler is the
+/// enforcement (rusqlite's `hooks` feature): every `SQL_PROGRESS_OPS` virtual-machine instructions
+/// it asks the clock, and a `true` answer aborts the running statement with `SQLITE_INTERRUPT`
+/// rather than letting a runaway query hold the connection — and with it the whole dashboard —
+/// open-ended.
+pub const SQL_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// VM instructions between progress-handler calls. Coarse enough that the handler is a rounding
+/// error next to the query it is watching, fine enough that a 10 s budget is overshot by
+/// milliseconds, not seconds.
+const SQL_PROGRESS_OPS: i32 = 2_000;
+
+/// Monotonic milliseconds since this process started — the clock the interrupt deadline is kept
+/// against. `SystemTime` would let an NTP correction extend or cancel a running budget.
+fn elapsed_ms() -> i64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as i64
+}
+
+/// One statement of a console script, in the order it ran. A statement that failed carries the
+/// SQLite message in `error` and ends the script; `rows` is one JSON array per result row in
+/// column order, `changes` is `sqlite3_changes` for a write.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SqlResult {
+    pub sql: String, pub columns: Vec<String>, pub rows: Vec<Vec<serde_json::Value>>,
+    pub truncated: bool, pub changes: usize, pub error: Option<String>,
+}
+
+impl SqlResult {
+    /// The wire shape, keys in this order (see the `preserve_order` note in Cargo.toml). The
+    /// console is opt-in tooling, so the raw statement text goes back to the caller with its
+    /// result — it is the user's own SQL, echoed for the per-statement heading.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sql": self.sql, "columns": self.columns, "rows": self.rows,
+            "truncated": self.truncated, "changes": self.changes, "error": self.error,
+        })
+    }
+
+    fn ok_write(sql: String, changes: usize) -> SqlResult {
+        SqlResult { sql, columns: Vec::new(), rows: Vec::new(), truncated: false,
+                    changes, error: None }
+    }
+}
+
+/// A SQLite value in its JSON form. `NULL` stays null, integers and reals stay numbers, text
+/// stays text, and a blob is lowercase hex — up to 256 bytes, past which the console reports the
+/// size instead of shipping a megabyte of hex to the browser.
+fn json_of(value: rusqlite::types::Value) -> serde_json::Value {
+    use rusqlite::types::Value as V;
+    match value {
+        V::Null => serde_json::Value::Null,
+        V::Integer(i) => serde_json::Value::from(i),
+        V::Real(f) => serde_json::Value::from(f),
+        V::Text(t) => serde_json::Value::from(t),
+        V::Blob(b) if b.len() > 256 =>
+            serde_json::Value::from(format!("<blob {} bytes>", b.len())),
+        V::Blob(b) => serde_json::Value::from(
+            b.iter().map(|byte| format!("{byte:02x}")).collect::<String>()),
+    }
+}
+
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
-
 impl Db {
     pub fn open(path: &Path) -> anyhow::Result<Db> {
         // The default path is `data/lomora.db`, and a fresh checkout has no `data/` folder.
@@ -254,8 +321,143 @@ impl Db {
         }))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// Runs a whole SQL script for the raw-SQL console: statements in order, one result each,
+    /// the first failure ending the script. Splitting is SQLite's own — `rusqlite::Batch` walks
+    /// the `sqlite3_prepare_v2` tail exactly like the `sqlite3` CLI does, so a semicolon inside
+    /// a string literal or a trigger body is never mistaken for a statement end, and a
+    /// multi-statement text that `Connection::prepare` rejects with `MultipleStatement` runs
+    /// fine. The text is not filtered: reaching this method means the operator chose
+    /// `LOMORA_SQL`, and the promise of that switch is raw SQL, `DROP TABLE` included.
+    ///
+    /// Errors that are *about a statement* come back inside `SqlResult::error` — they are the
+    /// console's output, not a transport failure. Only SQLite refusing to install the progress
+    /// handler reaches the `anyhow::Result`.
+    pub async fn run_sql(&self, script: &str, budget: std::time::Duration)
+        -> anyhow::Result<Vec<SqlResult>>
+    {
+        use std::sync::atomic::{AtomicI64, Ordering::Relaxed};
+        let c = self.0.clone();
+        // `mut` because `progress_handler` takes `&mut self`: it swaps a boxed closure in SQLite's
+        // client data, which is not something a shared handle may do.
+        let mut g = c.lock().await;
+        let deadline = Arc::new(AtomicI64::new(0));
+        let armed = deadline.clone();
+        // The handler runs on this thread, inside SQLite's VM, every `SQL_PROGRESS_OPS`
+        // instructions: an atomic load and a clock read, and `true` aborts whatever statement is
+        // executing. Zero means disarmed, so a script that finishes early cannot be interrupted
+        // by a stale deadline.
+        g.progress_handler(SQL_PROGRESS_OPS, Some(move || {
+            let dl = armed.load(Relaxed);
+            dl != 0 && elapsed_ms() > dl
+        }))?;
+        // Armed after the install, and from this moment: the task may have queued behind a
+        // benchmark for the connection, and the budget covers the script, not the wait.
+        deadline.store(elapsed_ms() + budget.as_millis() as i64, Relaxed);
+        let out = run_script(&g, script);
+        deadline.store(0, Relaxed);
+        // The handler comes off with the run, so ordinary dashboard queries pay nothing for a
+        // tool they never use. Any flag the last statement picked up on its way out is spent
+        // here, on a query of our own, rather than on the dashboard's next read.
+        g.progress_handler(0, None::<fn() -> bool>)?;
+        for _ in 0..3 {
+            if !g.is_interrupted() { break; }
+            let _ = g.query_row("SELECT 1", [], |r| r.get::<_, i64>(0));
+        }
+        Ok(out)
+    }
+    /// A compacted copy of the whole database as bytes, which is what `GET /api/sql/backup`
+    /// offers for download. `VACUUM INTO` is the mechanism rather than a file read: it writes a
+    /// defragmented copy from one read transaction, so the bytes are a consistent snapshot even
+    /// while the console is mid-edit, it works on an in-memory database (a test handle, and
+    /// `Db::in_memory` is what every test server runs on), and it cannot catch the `-journal`
+    /// sidecar mid-write. The target is a temporary file, read back and removed on every path —
+    /// including a failed `VACUUM`, which leaves whatever SQLite created behind.
+    pub async fn backup_bytes(&self) -> anyhow::Result<Vec<u8>> {
+        let c = self.0.clone(); let g = c.lock().await;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos()).unwrap_or(0);
+        let tmp = std::env::temp_dir()
+            .join(format!("lomora-backup-{}-{stamp}.db", std::process::id()));
+        let target = tmp.to_str()
+            .ok_or_else(|| anyhow::anyhow!("the temporary backup path is not valid UTF-8: {}",
+                                          tmp.display()))?;
+        let out = (|| -> anyhow::Result<Vec<u8>> {
+            g.execute("VACUUM INTO ?1", params![target])?;
+            std::fs::read(&tmp)
+                .map_err(|e| anyhow::anyhow!("reading the backup copy {}: {e}", tmp.display()))
+        })();
+        // Removed whether the vacuum worked or not: a leftover copy is the kind of file that
+        // silently grows one per retry in the user's temp folder.
+        std::fs::remove_file(&tmp).ok();
+        out
+    }
 }
 
+/// The script loop: prepare the next statement, run it, stop on its first error.
+fn run_script(conn: &Connection, script: &str) -> Vec<SqlResult> {
+    // In scope only here: `Batch` is walked through rusqlite's re-exported `FallibleIterator`,
+    // and a module-wide import would put `next()` in scope for every iterator in this file.
+    use rusqlite::fallible_iterator::FallibleIterator;
+    let mut batch = rusqlite::Batch::new(conn, script);
+    let mut out = Vec::new();
+    loop {
+        let stmt = match batch.next() {
+            Ok(Some(stmt)) => stmt,
+            Ok(None) => break,
+            // A prepare failure has no statement to hang it on yet (bad syntax in the text that
+            // follows): report it with an empty `sql` and stop.
+            Err(e) => {
+                out.push(SqlResult { sql: String::new(), columns: Vec::new(), rows: Vec::new(),
+                                     truncated: false, changes: 0, error: Some(e.to_string()) });
+                break;
+            }
+        };
+        let result = run_statement(stmt);
+        let stop = result.error.is_some();
+        out.push(result);
+        if stop { break; }
+    }
+    out
+}
+
+/// One prepared statement: rows if it has columns, `sqlite3_changes` if it does not. A write with
+/// `RETURNING` takes the row branch, so its `changes` reads 0 and the returned rows carry the
+/// effect — which is what the caller asked SQLite for.
+fn run_statement(mut stmt: rusqlite::Statement<'_>) -> SqlResult {
+    let sql = stmt.expanded_sql().unwrap_or_default().trim().to_string();
+    if stmt.column_count() == 0 {
+        return match stmt.execute([]) {
+            Ok(changes) => SqlResult::ok_write(sql, changes),
+            Err(e) => SqlResult { sql, columns: Vec::new(), rows: Vec::new(),
+                                  truncated: false, changes: 0, error: Some(e.to_string()) },
+        };
+    }
+    let columns: Vec<String> = stmt.column_names().map(str::to_string).collect();
+    let width = columns.len();
+    let (mut rows, mut truncated, mut error) = (Vec::new(), false, None::<String>);
+    let mut result = stmt.raw_query();
+    loop {
+        if rows.len() == SQL_MAX_ROWS { truncated = true; break; }
+        match result.next() {
+            Err(e) => { error = Some(e.to_string()); break; }
+            Ok(None) => break,
+            Ok(Some(row)) => {
+                let mut values = Vec::with_capacity(width);
+                for i in 0..width {
+                    match row.get::<_, rusqlite::types::Value>(i) {
+                        Ok(v) => values.push(json_of(v)),
+                        Err(e) => { error = Some(e.to_string()); break; }
+                    }
+                }
+                if error.is_some() { break; }
+                rows.push(values);
+            }
+        }
+    }
+    SqlResult { sql, columns, rows, truncated, changes: 0, error }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +681,139 @@ mod tests {
         let p = db.profile().await.unwrap();
         assert_eq!(p.name, "My workstation");
         assert_eq!(p.notes, "");
+    }
+
+    // ---- the raw-SQL console (store side) ------------------------------------------------
+    //
+    // The console is the one place a caller supplies SQL rather than the crate, so these tests
+    // pin the contract the toolbox UI is built on: statements run in order as SQLite sees them,
+    // each with its own result, the run stops at the first error, a big read is capped, and a
+    // query that outlives its budget aborts without leaving the connection unusable.
+
+    /// `SqlResult::rows` is a `Vec<Vec<Value>>` (one array per row, in column order), which does
+    /// not compare against a `json!` literal directly; this turns the expected shape into the
+    /// same tree the store builds.
+    fn table(rows: &[Vec<serde_json::Value>]) -> serde_json::Value {
+        serde_json::to_value(rows).expect("a Vec<Vec<Value>> always serializes")
+    }
+
+    /// A `SELECT` answers with its column names and one JSON array per row, in SQL order; the
+    /// write statements report `changes` and no columns.
+    #[tokio::test]
+    async fn run_sql_reports_columns_rows_and_changes_per_statement() {
+        let db = Db::in_memory();
+        let seed = |kind: &str| RunRow {
+            id: 0, kind: kind.into(), timestamp: "2026-11-05 09:41:03".into(),
+            model: "m".into(), max_tokens: 8, ttft_ms: None, total_s: 1.0, tokens: 8,
+            tok_per_s: 8.0, concurrency: None, base_url: None };
+        db.insert_run(&seed("single")).await.unwrap();
+        db.insert_run(&seed("stress")).await.unwrap();
+
+        let out = db.run_sql("SELECT id, model, concurrency FROM runs ORDER BY id",
+                             super::SQL_BUDGET).await.unwrap();
+        assert_eq!(out.len(), 1, "one statement in, one result out");
+        assert_eq!(out[0].columns, vec!["id", "model", "concurrency"]);
+        assert_eq!(table(&out[0].rows),
+                   serde_json::json!([[1, "m", null], [2, "m", null]]));
+        assert!(!out[0].truncated);
+        assert_eq!(out[0].changes, 0, "a read changes nothing");
+        assert_eq!(out[0].error, None, "{:?}", out[0].error);
+
+        let out = db.run_sql("UPDATE runs SET model = 'renamed'", super::SQL_BUDGET)
+            .await.unwrap();
+        assert_eq!(out[0].changes, 2, "sqlite3_changes must reach the caller");
+        assert!(out[0].columns.is_empty() && out[0].rows.is_empty(), "a write has no rows");
+    }
+
+    /// The whole script goes to SQLite the way the `sqlite3` CLI does it: no hand-rolled
+    /// semicolon splitting, and a multi-statement text that `Connection::prepare` would reject
+    /// with `MultipleStatement` runs statement by statement.
+    #[tokio::test]
+    async fn run_sql_executes_a_multi_statement_script_in_order() {
+        let db = Db::in_memory();
+        let out = db.run_sql("CREATE TABLE t (a INTEGER);
+                              INSERT INTO t VALUES (1), (2);
+                              SELECT count(*) FROM t;", super::SQL_BUDGET).await.unwrap();
+        assert_eq!(out.len(), 3, "every statement gets a result: {out:?}");
+        assert!(out.iter().all(|r| r.error.is_none()), "{:?}", out.iter().map(|r| &r.error).collect::<Vec<_>>());
+        assert_eq!(out[1].changes, 2);
+        assert_eq!(table(&out[2].rows), serde_json::json!([[2]]));
+    }
+
+    /// A script stops at its first failure — and the statements after it never run, so a typo
+    /// halfway through an UPDATE chain cannot leave the table half-edited in silence.
+    #[tokio::test]
+    async fn run_sql_stops_at_the_first_error_and_reports_it() {
+        let db = Db::in_memory();
+        let out = db.run_sql("CREATE TABLE t (a INTEGER);
+                              INSERT INTO t VALUES (1);
+                              SELECT * FROM nope;
+                              INSERT INTO t VALUES (2);", super::SQL_BUDGET).await.unwrap();
+        assert_eq!(out.len(), 3, "the fourth statement is never reached");
+        let err = out[2].error.as_deref().unwrap_or_default();
+        assert!(err.contains("no such table"), "{err}");
+        let left = db.run_sql("SELECT count(*) FROM t", super::SQL_BUDGET).await.unwrap();
+        assert_eq!(table(&left[0].rows), serde_json::json!([[1]]), "only the first insert ran");
+    }
+
+    /// Reads are capped: the toolbox is a console, not a way to stream a whole table through
+    /// the dashboard, and `truncated` tells the caller the page was cut.
+    #[tokio::test]
+    async fn run_sql_caps_a_big_select_and_flags_the_truncation() {
+        let db = Db::in_memory();
+        let out = db.run_sql("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c \
+                              WHERE x < 300) SELECT x FROM c", super::SQL_BUDGET)
+            .await.unwrap();
+        assert_eq!(out[0].rows.len(), super::SQL_MAX_ROWS, "the cap is the documented page size");
+        assert!(out[0].truncated, "and the caller is told the read was cut");
+        assert_eq!(out[0].error, None, "truncating is not failing");
+    }
+
+    /// The budget: a query that outlives it aborts with SQLite's own interrupt error and the
+    /// connection keeps working afterwards — the dashboard must survive its own console.
+    #[tokio::test]
+    async fn run_sql_aborts_a_query_that_outlives_its_budget_and_keeps_the_connection_usable() {
+        let db = Db::in_memory();
+        let started = std::time::Instant::now();
+        let out = db.run_sql("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) \
+                              SELECT count(*) FROM c", std::time::Duration::from_millis(150))
+            .await.unwrap();
+        let took = started.elapsed();
+        let err = out.last().and_then(|r| r.error.clone())
+            .expect("the runaway statement must fail, not hang");
+        assert!(err.to_lowercase().contains("interrupt"), "{err}");
+        // Both bounds matter: it ran for a moment (so the handler was not firing at once) and it
+        // stopped on the budget rather than on some limit of its own — left to itself this query
+        // never ends, and the test would hang instead of failing.
+        assert!(took >= std::time::Duration::from_millis(100), "aborted after {took:?}");
+        assert!(took < std::time::Duration::from_secs(3), "aborted after {took:?}");
+        // The same connection still answers, and the handler is gone: a later read is not
+        // interrupted by a stale deadline.
+        let after = db.run_sql("SELECT 1", super::SQL_BUDGET).await.unwrap();
+        assert_eq!(table(&after[0].rows), serde_json::json!([[1]]));
+        assert_eq!(db.recent_runs(5).await.unwrap().len(), 0, "normal reads still work");
+    }
+
+    /// Every SQLite storage class reaches JSON as itself: NULL stays null, integers and reals
+    /// stay numbers, text stays text, and a blob is reported as lowercase hex — until it is too
+    /// big to be worth shipping, when the console names its size instead.
+    #[tokio::test]
+    async fn run_sql_maps_every_sqlite_type_to_json() {
+        let db = Db::in_memory();
+        let out = db.run_sql("SELECT NULL AS n, 42 AS i, 1.5 AS r, 'txt' AS t, x'010a' AS b",
+                             super::SQL_BUDGET).await.unwrap();
+        assert_eq!(table(&out[0].rows),
+                   serde_json::json!([[null, 42, 1.5, "txt", "010a"]]));
+        let big = db.run_sql("SELECT zeroblob(300) AS b", super::SQL_BUDGET).await.unwrap();
+        assert_eq!(table(&big[0].rows), serde_json::json!([["<blob 300 bytes>"]]));
+    }
+
+    /// Whitespace and comments are not statements: an empty script runs nothing and is not an
+    /// error, so an accidental Run on an empty box is harmless.
+    #[tokio::test]
+    async fn run_sql_of_an_empty_or_comment_only_script_runs_nothing() {
+        let db = Db::in_memory();
+        assert!(db.run_sql("", super::SQL_BUDGET).await.unwrap().is_empty());
+        assert!(db.run_sql("  \n -- just a comment\n ", super::SQL_BUDGET).await.unwrap().is_empty());
     }
 }

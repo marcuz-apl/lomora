@@ -46,6 +46,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/stress", post(crate::routes::stress_test))
         .route("/api/prompts", get(crate::routes::get_prompts))
         .route("/api/prompts/fetch", post(crate::routes::fetch_prompts))
+        // Both halves of the console are gated on `LOMORA_SQL` inside the handlers, not here: the
+        // routes exist in every build, so a disabled console answers its documented refusal
+        // instead of a 404 the dashboard would have to guess about.
+        .route("/api/sql", post(crate::routes::run_sql))
+        .route("/api/sql/backup", get(crate::routes::sql_backup))
         .fallback(fallback)
         .layer(cors)
         .with_state(state)

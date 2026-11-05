@@ -10,6 +10,10 @@ pub struct Config {
     /// `(category, url)` pairs the question fetcher samples from; `LOMORA_PROMPTS_URLS`
     /// overrides the built-in benchmark set (`category=url` pairs, comma-separated).
     pub prompts_sources: Vec<(String, String)>,
+    /// `LOMORA_SQL`: the raw-SQL console (`POST /api/sql`, `GET /api/sql/backup`). Off unless the
+    /// environment says yes, because it hands anyone who can reach the dashboard the whole
+    /// database — see `parse_sql_switch`.
+    pub sql_console: bool,
 }
 
 /// Trailing-slash strip applied to every configured base URL.
@@ -75,6 +79,16 @@ pub fn parse_prompts_sources(env: Option<&str>) -> Vec<(String, String)> {
     if pairs.is_empty() { default_prompts_sources() } else { pairs }
 }
 
+/// `LOMORA_SQL` grammar: one word, trimmed and lower-cased, that opens the raw-SQL console only
+/// when it says yes. `1`, `true`, `on` and `yes` open it; anything else — including `0`, `""` and
+/// a mistyped `ture` — leaves it closed, because the console runs arbitrary SQL and the safe side
+/// of an ambiguous value is off. Pure so both sides are testable without touching the process
+/// environment.
+pub fn parse_sql_switch(env: Option<&str>) -> bool {
+    matches!(env.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+             Some("1" | "true" | "on" | "yes"))
+}
+
 /// The server-side default when a request omits `base_url`: an explicit `LMSTUDIO_URL` wins,
 /// then an explicit `OLLAMA_URL`, then LM Studio's conventional address. The dashboard always
 /// sends an explicit `base_url` (the provider dropdown hardcodes both URLs in the page), so
@@ -97,6 +111,7 @@ impl Config {
                 .filter(|v| !v.trim().is_empty()).map(PathBuf::from),
             prompts_sources: parse_prompts_sources(
                 std::env::var("LOMORA_PROMPTS_URLS").ok().as_deref()),
+            sql_console: parse_sql_switch(std::env::var("LOMORA_SQL").ok().as_deref()),
         }
     }
 }
@@ -134,6 +149,7 @@ mod tests {
             db_path: PathBuf::from("x.db"),
             static_dir: None,
             prompts_sources: Vec::new(),
+            sql_console: false,
         }
     }
 
@@ -172,5 +188,20 @@ mod tests {
         let cfg = cfg_with("http://lm:1234/");
         assert_eq!(resolve_base(&cfg, None), "http://lm:1234");
         assert_eq!(resolve_base(&cfg, Some("")), "http://lm:1234");
+    }
+
+    /// `LOMORA_SQL` is the gate on the raw-SQL console, so the default side matters more than
+    /// the yes side: unset, blank, `0` and unrecognised text all keep it closed, and only an
+    /// explicit yes (case- and whitespace-insensitive) opens it.
+    #[test]
+    fn the_sql_console_stays_off_until_the_env_says_yes() {
+        use super::parse_sql_switch;
+        assert!(parse_sql_switch(Some("1")), "the documented value opens the console");
+        assert!(parse_sql_switch(Some("true")));
+        assert!(parse_sql_switch(Some(" TRUE ")), "surrounding space and case are noise");
+        assert!(!parse_sql_switch(None), "no env means no console");
+        assert!(!parse_sql_switch(Some("")));
+        assert!(!parse_sql_switch(Some("0")), "an explicit no stays closed");
+        assert!(!parse_sql_switch(Some("yes-ish")), "unrecognised text does not open it");
     }
 }

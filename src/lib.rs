@@ -1,7 +1,9 @@
 pub mod app;
 pub mod assets;
 pub mod bench;
+pub mod cli;
 pub mod config;
+pub mod console;
 pub mod error;
 pub mod hw;
 pub mod mock;

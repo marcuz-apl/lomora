@@ -134,6 +134,16 @@ impl ProfileOut {
     }
 }
 
+/// Body of `POST /api/sql`: the script text, required. Nothing else — the console is deliberately
+/// unfiltered, because `LOMORA_SQL` is the gate and the operator's promise is raw SQL. The type
+/// check exists so a non-string (or a missing field) is the shared 422 rather than a 200 error.
+#[derive(Deserialize, Clone, Debug)]
+pub struct SqlReq { pub sql: String }
+
+impl SqlReq {
+    pub const FIELDS: &'static [FieldSpec] = &[FieldSpec::plain("sql", FieldKind::Str)];
+}
+
 /// The profile patch body: `name`/`notes` both default to `None`, and `set_profile` only
 /// overwrites a stored field when the incoming value is not `None`.
 /// serde maps both "key absent" and "key present but null" to `None`: either one leaves the

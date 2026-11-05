@@ -60,6 +60,16 @@ pub async fn fresh_app_cfg_on_db(cfg: lomora::config::Config, path: &std::path::
     spawn_app_with(cfg, lomora::store::Db::open(path).expect("test database")).await
 }
 
+/// The most explicit entry point: a caller-built `Config` over a caller-supplied `Db`, for the
+/// tests that must both flip a switch and read the very handle the app is serving. The SQL console
+/// refusal test needs both halves — it asserts over the store that nothing ran — and an in-memory
+/// database cannot be shared by path, only by handle.
+pub async fn spawn_cfg_on_db(cfg: lomora::config::Config, db: lomora::store::Db)
+    -> (String, tokio::task::JoinHandle<()>)
+{
+    spawn_app_with(cfg, db).await
+}
+
 /// A caller-built router on an ephemeral port — for mocks that need several routes with
 /// caller-chosen bodies (the multi-format benchmark-source mock), which the fixed mocks in
 /// `src/mock.rs` cannot express.

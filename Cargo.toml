@@ -1,6 +1,6 @@
 [package]
 name = "lomora"
-version = "0.1.3"
+version = "0.1.5"
 edition = "2024"
 # Required since src/bin/mock_upstream.rs exists: without it `cargo run` refuses to guess
 # between the `lomora` and `mock_upstream` binaries, and plain `cargo run` should start the server.
@@ -19,7 +19,10 @@ axum = "0.8.9"
 tokio = { version = "1.54.1", features = ["full"] }
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 tower-http = { version = "0.7.1", features = ["cors"] }
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+# `hooks` is only here for `Connection::progress_handler`, which gives the raw-SQL console its
+# interrupt budget (store.rs). It pulls `wal` and no new crates: the symbols are already in
+# libsqlite3-sys, which the `bundled` backend compiles.
+rusqlite = { version = "0.41.1", features = ["bundled", "hooks"] }
 sysinfo = "0.40.1"
 nvml-wrapper = "0.13.0"
 rust-embed = "8.13.0"
@@ -37,6 +40,18 @@ chrono = "0.4.45"
 # Decompresses HumanEval's `HumanEval.jsonl.gz` (the prompt fetcher's coding source) and nothing
 # else. The default `miniz_oxide` backend keeps it pure Rust, no C toolchain.
 flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+# The launch console policy in src/console.rs: `GetConsoleProcessList` tells us whether the window
+# belongs to Lomora alone, and `ShowWindow` hides or restores it. The crate is already in the tree
+# (sysinfo depends on it), so this adds no download - only the two feature gates those calls sit
+# behind.
+windows = { version = "0.62", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(unix)'.dependencies]
+# One call, `setsid`, for the `--hidden` re-exec in src/console.rs. Also already in the tree (tokio
+# and the TLS stack pull it), so this is a feature-free addition.
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["full"] }

@@ -237,6 +237,50 @@
   .about-meta a { color: var(--accent); text-decoration: none; }
   .about-meta a:hover { text-decoration: underline; }
 
+  /* ── CRUD Toolbox ────────────────────────────────────────────────────────────
+     The raw-SQL console that opens beneath the History table. Everything is drawn from the
+     theme variables the panels already use (no dark-only --bg-2), so light and dark render the
+     same way; the warning box is the shared --warn amber at low alpha, legible on both cards. */
+  #crudPanel { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
+  .crud-warn { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px;
+               border-radius: 10px; border: 1px solid rgba(245,158,11,0.38);
+               background: rgba(245,158,11,0.10); font-size: 0.8rem; line-height: 1.55; }
+  .crud-warn svg { flex: none; width: 17px; height: 17px; color: var(--warn); margin-top: 1px; }
+  .crud-warn strong { color: var(--text); font-weight: 600; }
+  .crud-warn code { font-size: 0.75rem; color: var(--text); }
+  #crudSql { width: 100%; min-height: 132px; margin-top: 14px; resize: vertical;
+             background: var(--input-bg); border: 1px solid var(--border); border-radius: 10px;
+             color: var(--text); padding: 12px 14px; font-size: 0.85rem; line-height: 1.55;
+             font-family: ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace;
+             transition: border-color 0.15s, box-shadow 0.15s; }
+  #crudSql:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,140,255,0.18); }
+  .crud-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  /* Steady captions while the spinner turns: same reserved-slot trick the run buttons use. */
+  #crudRunBtn, #crudBackupBtn { justify-content: center; white-space: nowrap;
+                                padding: 10px 18px; font-size: 0.85rem; }
+  #crudRunBtn::after, #crudBackupBtn::after { content: ''; width: 14px; flex: none; }
+  #crudNote { font-size: 0.78rem; color: var(--muted); }
+  #crudResults { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
+  .crud-stmt { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .crud-stmt-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+                    padding: 8px 12px; background: var(--badge-bg); }
+  .crud-idx { font-size: 0.72rem; color: var(--muted); font-weight: 600; }
+  .crud-sql { flex: 1 1 100%; min-width: 0; font-size: 0.72rem; color: var(--muted);
+              font-family: ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace;
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .crud-tag { font-size: 0.7rem; padding: 1px 8px; border-radius: 6px; color: var(--muted);
+              border: 1px solid var(--border); background: var(--badge-bg); white-space: nowrap; }
+  .crud-tag.ok { color: var(--ok); }
+  .crud-tag.bad { color: var(--err); }
+  .crud-rows { overflow-x: auto; }
+  .crud-rows table { font-size: 0.78rem; }
+  .crud-rows tbody td { padding: 7px 12px; }
+  .crud-null { color: var(--muted); font-style: italic; }
+  .crud-msg { padding: 10px 12px; font-size: 0.78rem; color: var(--err);
+              font-family: ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace;
+              white-space: pre-wrap; word-break: break-word; }
+  .crud-empty { padding: 10px 12px; font-size: 0.78rem; color: var(--muted); }
+
   @media (max-width: 640px) {
     body { padding: 20px 14px 32px; }
     /* Every card field stacks full-width, and form controls go to 16px so iOS Safari does
@@ -250,6 +294,13 @@
        basis from the desktop rule from turning into a basis for height. */
     #runBtn, #defaultsBtn, #stressBtn, #fetchBtn { flex: 0 0 auto; width: 100%; }
     #runBtn { margin-left: 0; }
+    /* The History header now carries four controls (CRUD Toolbox, pager info, two pager
+       buttons); they wrap onto their own rows instead of overflowing the panel. The CRUD
+       actions stack full-width like the run buttons, and the textarea joins the 16px rule
+       so iOS does not zoom on focus. */
+    #histNav { flex-wrap: wrap; justify-content: flex-end; width: 100%; }
+    #crudRunBtn, #crudBackupBtn { flex: 0 0 auto; width: 100%; }
+    #crudSql { font-size: 16px; min-height: 110px; }
     /* The two charting cards stack instead of squeezing side by side. */
     .chart-grid { grid-template-columns: minmax(0, 1fr); }
     /* Stress tiles go 2 per row: four ~80px columns would crush the values on a phone. */
@@ -354,7 +405,8 @@
 
 <div class="panel">
   <div class="section-title">History <span class="badge" id="histCount">0 runs</span>
-    <span style="margin-left:auto;display:flex;gap:10px;align-items:center;">
+    <span id="histNav" style="margin-left:auto;display:flex;gap:10px;align-items:center;">
+      <button id="crudBtn" onclick="toggleCrud()" aria-expanded="false" aria-controls="crudPanel" style="padding:8px 14px;">CRUD Toolbox</button>
       <button id="histPrev" onclick="histGo(-1)" style="padding:8px 14px;">&lt;- Prev 10</button>
       <span id="histPageInfo" style="font-size:.8rem;color:var(--muted);"></span>
       <button id="histNext" onclick="histGo(1)" style="padding:8px 14px;">Next -&gt;</button>
@@ -365,6 +417,30 @@
       <thead><tr><th>Time</th><th>Provider</th><th>Model</th><th>Max tokens</th><th>TTFT (ms)</th><th>Total (s)</th><th>Tokens</th><th>tok/s</th><th></th></tr></thead>
       <tbody id="tbody"><tr><td colspan="9" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr></tbody>
     </table>
+  </div>
+
+  <div id="crudPanel" hidden>
+    <div class="section-title">CRUD Toolbox <span class="badge">POST /api/sql</span></div>
+    <div class="crud-warn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div>
+        <strong>Raw SQL runs exactly as typed, with no undo.</strong>
+        This console is not filtered: <code>UPDATE</code> and <code>DELETE</code> rewrite or remove
+        your recorded runs, and <code>DROP TABLE</code> destroys a table outright. Statements execute
+        one after another and stop at the first error, a read is capped at 200 rows, and a statement
+        that outlives its 10-second budget is interrupted. Writes hold the database while they run,
+        so benchmark requests queue behind them. Download a backup before anything destructive.
+      </div>
+    </div>
+    <textarea id="crudSql" spellcheck="false" autocomplete="off"
+      placeholder="SELECT * FROM runs ORDER BY id DESC LIMIT 20;&nbsp;&nbsp;(Ctrl+Enter runs)"></textarea>
+    <div class="crud-actions">
+      <button id="crudRunBtn" onclick="runCrud()"><span class="spinner"></span><span class="btn-label">Run SQL</span></button>
+      <button id="crudBackupBtn" onclick="downloadBackup()"><span class="spinner"></span><span class="btn-label">Download backup</span></button>
+      <span id="crudNote"></span>
+    </div>
+    <div class="err" id="crudErr"></div>
+    <div id="crudResults"></div>
   </div>
 </div>
 
@@ -525,10 +601,21 @@ async function loadHardware(){
   } catch(e){ console.error(e); }
 }
 
+// Every cell is data this page did not write: `model` arrives from the request body, the rest
+// from SQLite — and the CRUD Toolbox below can now write any of them with raw SQL. So all eight
+// values go through esc(), which keeps a stored `<img onerror=…>` a string instead of a live tag
+// (verified: before this, such a model name really did execute). The delete control is the one
+// place a value reaches an attribute rather than text, so it renders only for an integer id —
+// which is what the app always writes — and a hand-made row with a non-integer id simply gets no
+// button instead of an injectable `onclick`.
 function addRow(r){
   const tr = document.createElement('tr');
-  tr.innerHTML = `<td>${r.timestamp}</td><td>${r.provider ?? '—'}</td><td>${r.model}</td><td>${r.max_tokens}</td><td>${r.ttft_ms ?? '-'}</td><td>${r.total_s}</td><td>${r.tokens}</td><td><strong>${r.tok_per_s}</strong></td>` +
-    `<td class="del"><button title="Delete this run" onclick="deleteRun(${r.id})">&#10005;</button></td>`;
+  const del = Number.isInteger(r.id)
+    ? `<td class="del"><button title="Delete this run" onclick="deleteRun(${r.id})">&#10005;</button></td>`
+    : '<td class="del"></td>';
+  tr.innerHTML = `<td>${esc(r.timestamp)}</td><td>${esc(r.provider ?? '—')}</td><td>${esc(r.model)}</td>`
+    + `<td>${esc(r.max_tokens)}</td><td>${esc(r.ttft_ms ?? '-')}</td><td>${esc(r.total_s)}</td>`
+    + `<td>${esc(r.tokens)}</td><td><strong>${esc(r.tok_per_s)}</strong></td>` + del;
   document.getElementById('tbody').prepend(tr);
 }
 
@@ -569,6 +656,12 @@ async function loadHistory(){
     const h = await r.json();
     histTotal = Number(r.headers.get('x-total-runs')) || h.length;
     const pages = Math.max(1, Math.ceil(histTotal / HIST_PAGE));
+    // A page can stop existing underneath the reader — the row delete above, or a DELETE
+    // through the CRUD Toolbox, shrinking the dataset past the open offset. Page N of a shorter
+    // history is legitimately empty, but rendering "No runs yet" for rows that live one page
+    // back is wrong, so clamp to the last real page and read again. histPageNum only ever
+    // decreases here, so this recurses at most once.
+    if (histPageNum >= pages){ histPageNum = pages - 1; return loadHistory(); }
     const tbody = document.getElementById('tbody');
     if (!h.length) { tbody.innerHTML = '<tr><td colspan="9" class="empty">No runs yet. Click "Run Test" to benchmark.</td></tr>'; }
     else { tbody.innerHTML = ''; h.forEach(addRow); }
@@ -585,6 +678,121 @@ function histGo(dir){
   histPageNum = Math.min(Math.max(histPageNum + dir, 0), pages - 1);
   loadHistory();
 }
+
+// ── CRUD Toolbox ──────────────────────────────────────────────────────────────
+// The raw-SQL console under the History table. The gate lives on the server (LOMORA_SQL), and
+// a disabled console answers its refusal in the usual 200 error envelope rather than a 404, so
+// the panel is offered unconditionally and simply reports what the server said — the UI never
+// guesses at how the binary was started, and never re-implements SQL: it sends text and renders
+// the statements that come back, in execution order.
+function toggleCrud(){
+  const panel = document.getElementById('crudPanel');
+  panel.hidden = !panel.hidden;
+  document.getElementById('crudBtn').setAttribute('aria-expanded', String(!panel.hidden));
+  if (!panel.hidden) document.getElementById('crudSql').focus();
+}
+
+// A statement's outcome is a tag row, not prose: rows read, rows written, whether the 200-row
+// page was cut short, and whether SQLite rejected it. Only reads get a table — an
+// INSERT/UPDATE/DELETE has no columns to show, just its change count. Every value passes
+// through esc(): prompts, model names, cell text and SQLite's own messages are all data this
+// page did not write.
+function crudBlock(s, i){
+  const cols = Array.isArray(s.columns) ? s.columns : [];
+  const rows = Array.isArray(s.rows) ? s.rows : [];
+  const tags = [];
+  if (s.error) tags.push('<span class="crud-tag bad">error</span>');
+  if (cols.length) tags.push(`<span class="crud-tag">${rows.length} row${rows.length===1?'':'s'} read</span>`);
+  if (s.changes) tags.push(`<span class="crud-tag ok">${s.changes} row${s.changes===1?'':'s'} written</span>`);
+  if (s.truncated) tags.push('<span class="crud-tag bad">truncated at 200 rows</span>');
+  // A statement SQLite never managed to prepare comes back with an empty `sql` (there is no
+  // prepared statement to read the text off), which would render a blank headline over the error.
+  const sql = String(s.sql ?? '') || (s.error ? '(statement that did not parse)' : '');
+  let body = '';
+  if (s.error) body = `<div class="crud-msg">${esc(s.error)}</div>`;
+  else if (!cols.length) body = '';
+  else if (!rows.length) body = '<div class="crud-empty">no rows</div>';
+  else body = '<div class="crud-rows"><table><thead><tr>'
+    + cols.map(c => `<th>${esc(c)}</th>`).join('') + '</tr></thead><tbody>'
+    + rows.map(r => '<tr>' + (Array.isArray(r) ? r : []).map(v =>
+        `<td>${v === null ? '<span class="crud-null">NULL</span>' : esc(v)}</td>`).join('') + '</tr>').join('')
+    + '</tbody></table></div>';
+  return `<div class="crud-stmt"><div class="crud-stmt-head"><span class="crud-idx">${i+1}</span>`
+    + tags.join('') + `<span class="crud-sql" title="${esc(sql)}">${esc(sql)}</span></div>${body}</div>`;
+}
+
+// A statement that wrote rows changed the very table underneath the console, so the page (and
+// both charts, which read the same recent-60 window) reloads after any non-zero change count.
+// The pager is deliberately left on its page: deleting a row from page 3 should not jump the
+// user back to the newest page.
+async function runCrud(){
+  const sql = document.getElementById('crudSql').value.trim();
+  const err = document.getElementById('crudErr');
+  const note = document.getElementById('crudNote');
+  const btn = document.getElementById('crudRunBtn');
+  err.textContent = ''; note.textContent = '';
+  if (!sql){ err.textContent = 'Nothing to run — type a statement first'; return; }
+  btn.disabled = true; btn.classList.add('loading');
+  note.textContent = 'Running…';
+  try {
+    const r = await fetch('/api/sql', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({sql})});
+    const d = await r.json();
+    const results = document.getElementById('crudResults');
+    // Two stop shapes: the 200 error envelope (a console switched off by LOMORA_SQL, or a store
+    // failure) and the shared 422 field errors, which this client should never trigger but must
+    // not render as a blank success either.
+    if (d.error){ err.textContent = d.error; results.innerHTML=''; note.textContent=''; return; }
+    if (!r.ok && Array.isArray(d.detail)){
+      err.textContent = 'Invalid request: ' + d.detail.map(x =>
+        `${(x.loc || []).slice(-1)[0]} ${x.type}`).join(', ');
+      results.innerHTML=''; note.textContent=''; return;
+    }
+    const stmts = Array.isArray(d.statements) ? d.statements : [];
+    results.innerHTML = stmts.map(crudBlock).join('');
+    const written = stmts.reduce((n,s)=>n+(s.changes||0), 0);
+    const failed = stmts.filter(s=>s.error).length;
+    note.textContent = `${stmts.length} statement${stmts.length===1?'':'s'}`
+      + (written ? ` · ${written} row${written===1?'':'s'} written` : '')
+      + (failed ? ` · ${failed} failed` : '');
+    if (written){ await loadHistory(); await loadChart(); }
+  } catch(e){ err.textContent = String(e); }
+  finally { btn.disabled = false; btn.classList.remove('loading'); }
+}
+
+// The backup is a file, but a disabled or failing console answers the JSON envelope with the
+// same 200 status — so the content type, not the status, decides between saving and reporting.
+async function downloadBackup(){
+  const btn = document.getElementById('crudBackupBtn');
+  const err = document.getElementById('crudErr');
+  const note = document.getElementById('crudNote');
+  err.textContent=''; note.textContent='Saving backup…';
+  btn.disabled = true; btn.classList.add('loading');
+  try {
+    const r = await fetch('/api/sql/backup');
+    if (!r.ok || (r.headers.get('content-type') || '').includes('json')) {
+      const d = await r.json().catch(() => ({ error: `backup failed (HTTP ${r.status})` }));
+      err.textContent = d.error || 'backup failed';
+      note.textContent = '';
+      return;
+    }
+    const name = /filename="?([^";]+)"?/.exec(r.headers.get('content-disposition') || '')?.[1]
+      || 'lomora.db';
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    note.textContent = `Backup saved as ${name}`;
+  } catch(e){ err.textContent = String(e); note.textContent=''; }
+  finally { btn.disabled = false; btn.classList.remove('loading'); }
+}
+
+// Ctrl+Enter (Cmd+Enter on a Mac) runs, the way every other SQL box behaves; a plain Enter
+// still just moves to the next line of a multi-statement script.
+document.getElementById('crudSql').addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter'){ e.preventDefault(); runCrud(); }
+});
 
 async function loadChart(){
   try {

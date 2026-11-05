@@ -1,8 +1,62 @@
+use std::process::ExitCode;
+
+use lomora::cli::Action;
+#[cfg(unix)]
+use lomora::cli::Console;
+use lomora::config::Config;
 use tokio::net::TcpListener;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cfg = lomora::config::Config::from_env();
+/// Everything that must happen before a thread exists - options, the console decision, the Unix
+/// detach - runs in this sync part. Only `run` hands over to the tokio runtime.
+fn main() -> ExitCode {
+    // Parsed first, and refused hard: an unknown option must never quietly start a server.
+    let launch = match lomora::cli::from_env() {
+        Ok(l) => l,
+        Err(msg) => { eprintln!("{msg}"); return ExitCode::from(2); }
+    };
+    if launch.action == Action::Help {
+        print!("{}", lomora::cli::USAGE);
+        return ExitCode::SUCCESS;
+    }
+
+    let cfg = Config::from_env();
+
+    // `--hidden` on Unix means "go away and keep working": the launcher re-execs a detached copy
+    // of this binary, waits for the port to answer, reports, and exits. The child arrives back here
+    // with `LOMORA_DAEMON=1` and skips the whole branch.
+    #[cfg(unix)]
+    if launch.console == Console::Hidden && !launch.daemonized {
+        return match lomora::console::daemonize(cfg.port) {
+            Ok(code) => code,
+            Err(e) => { eprintln!("Error: {e:?}"); ExitCode::FAILURE }
+        };
+    }
+
+    // Windows: hide the console when it belongs to this process alone. Doing it before the
+    // hardware sampler starts is what keeps the flash to the window-creation time.
+    lomora::console::apply_console(launch.console);
+    if launch.daemonized { lomora::console::write_pid_file(&cfg.db_path); }
+
+    match run(cfg) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // A failure nobody can see is worse than the window this whole branch exists to hide.
+            // When the window was hidden, hold it open: it would otherwise close with the process.
+            let revealed = lomora::console::reveal_console();
+            eprintln!("Error: {e:?}");
+            lomora::console::wait_for_enter(revealed);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The runtime is built here rather than by `#[tokio::main]` because the console and daemon
+/// decisions above must run while the process is still single-threaded.
+fn run(cfg: Config) -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve(cfg))
+}
+
+async fn serve(cfg: Config) -> anyhow::Result<()> {
     let port = cfg.port;
     // GPU index 0 only; NVML absent -> NoGpu, which answers with the GPU keys missing rather
     // than with nulls. The handle re-checks for NVML on a slow cadence, so a driver installed
