@@ -33,7 +33,7 @@ Requirements: Rust stable (tested with 1.97), and optionally an NVIDIA driver ex
 
    The release executable is written to `target/release/lomora` (`lomora.exe` on Windows) and embeds the dashboard, so it runs on its own. Open http://localhost:8501 once it starts.
 
-Run history is stored in a local SQLite database (`data/lomora.db` by default, created on first start) and, like the system profile, survives restarts. The dashboard lists runs newest-first with full `YYYY-MM-DD HH:MM:SS` timestamps and pages through the whole dataset (10 rows per page) via `GET /api/history?limit=&offset=`, which reports the total count in `X-Total-Runs`. Each row carries a ✕ button that deletes exactly that record (`DELETE /api/history/{id}`). Rows written before the date became part of the timestamp are dated once at startup from their stored creation time.
+Run history is stored in a local SQLite database (`data/lomora.db` by default, created on first start) and, like the system profile, survives restarts. The dashboard lists runs newest-first with full `YYYY-MM-DD HH:MM:SS` timestamps and pages through the whole dataset (10 rows per page) via `GET /api/history?limit=&offset=`, which reports the total count in `X-Total-Runs`. Each row shows the provider it ran against and a ✕ button that deletes exactly that record (`DELETE /api/history/{id}`). The provider label is written from the run's upstream when the row is inserted, not derived at render time, so a history mixing LM Studio, Ollama and llama.cpp stays labelled after the select changes; rows from before the column existed are backfilled once from their stored base URL. Rows written before the date became part of the timestamp are dated once at startup from their stored creation time.
 
 ### Benchmark question pool
 
@@ -41,13 +41,13 @@ The dashboard ships 18 built-in benchmark questions across five categories (reas
 
 ### Providers and API keys
 
-The Provider select presets the base URL: LM Studio (`:1234`), Ollama (`:11434`), Moderado Gateway (`:4788`), or Custom. The optional API Key field is kept only in the browser (localStorage) and sent inside benchmark request bodies; the server forwards it to the upstream as `Authorization: Bearer <key>` and never stores it.
+The Provider select presets the base URL: llama.cpp (`:9931`), LM Studio (`:1234`), Ollama (`:11434`), Moderado (`:4788`), or Custom. The label is recorded with each run as a stored history column (`LM Studio`, `Ollama`, `Moderado`, `llama.cpp`, or `Custom`), so the table stays readable when the select moves on to another server. The optional API Key field is kept only in the browser (localStorage) and sent inside benchmark request bodies; the server forwards it to the upstream as `Authorization: Bearer <key>` and never stores it.
 
 ### Stress test
 
 The stress card fans `requests` completions (1-500) out behind a semaphore of `concurrency` permits (1-32) and records one synthetic history row named `<model> (stress xN)`. Its eight summary tiles sit in two rows of four (two per row on phones) and fade away 30 seconds after the run — the status box then says so, and the run itself stays in the history table and charts. TTFT is measured for single runs only: stress requests are non-streaming, so there is no first-token event to time.
 
-### CRUD Toolbox (raw SQL)
+### CRUD Toolbox (SQL console)
 
 The **CRUD Toolbox** button, left of `<- Prev 10` in the History header, opens a SQL console beneath the history table. It is switched off by default. On a windowless Windows launch the tray's **Settings → Allow SQL CRUD** item opens it for that session after a confirmation, because row-level SQL on a `0.0.0.0` listener reaches the whole network; everywhere else start Lomora with `LOMORA_SQL=1` (or `true`, `on`, `yes`) to enable it. With the switch on, the console posts whatever you type straight to SQLite — no preview and no undo. Rows are fair game: an `UPDATE` or `DELETE` rewrites or removes your recorded runs, and writes hold the database while they run, so benchmark requests queue behind them. The schema is guarded by SQLite's authorizer, which refuses every `DROP` (table, index, view or trigger, temporary included), `ALTER TABLE`, `ATTACH`/`DETACH` and a write to `PRAGMA writable_schema`; `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `CREATE` still run. Take a backup first: **Download backup** calls `GET /api/sql/backup`, which streams a consistent copy of the database (`VACUUM INTO`) as a dated `.db` file.
 
@@ -57,7 +57,7 @@ Scripts run statement by statement in the order written and stop at the first er
 
 On Windows a console opened by a double-click, an Explorer launch, or an autostart entry is Lomora's alone, so Lomora detaches from it as it starts: the window and its taskbar entry disappear, leaving only the tray icon. Closing the console rather than hiding the window is deliberate: on Windows 11 the default terminal is often Windows Terminal, which hosts the console in its own window, so hiding the window would leave that host on the taskbar. Started from a shell the console belongs to that shell, so it stays open — closing it would take your terminal with it — and Lomora prints a note instead. `--hidden` asks for the windowless launch explicitly (on a shared console it prints that same note rather than pulling the window out from under the shell), and `--console` never closes anything, which is what you want when reading startup messages. If startup fails after the console was closed there is no window left to print to, so the error appears in a message box.
 
-When the console is closed, Lomora also adds a notification-area icon, so the running server never becomes unreachable: the icon's tooltip shows the dashboard address, a one-time notification repeats it at startup, and double-clicking the icon or choosing **Open dashboard** opens it in the default browser. **Settings → Allow SQL CRUD** opens or closes the raw-SQL console for this session only — a confirmation is shown before it opens, and a restart returns to whatever `LOMORA_SQL` said. **About** lists the product name, version, dashboard address, repository and license, and **Check for updates…** opens the GitHub release page. **Quit** stops the server gracefully (in-flight requests and database writes finish first). Launches that keep their console — `--console`, any shell launch — get no icon, since the window and Ctrl+C are already there. On Linux and macOS `--hidden` is a detached process controlled through its pid file instead.
+When the console is closed, Lomora also adds a notification-area icon, so the running server never becomes unreachable: the icon's tooltip shows the dashboard address, a one-time notification repeats it at startup, and double-clicking the icon or choosing **Open dashboard** opens it in the default browser. **Settings → Allow SQL CRUD** opens or closes the SQL console for this session only — a confirmation is shown before it opens, and a restart returns to whatever `LOMORA_SQL` said. **About** lists the product name, version, dashboard address, repository and license, and **Check for updates…** opens the GitHub release page. **Quit** stops the server gracefully (in-flight requests and database writes finish first). Launches that keep their console — `--console`, any shell launch — get no icon, since the window and Ctrl+C are already there. On Linux and macOS `--hidden` is a detached process controlled through its pid file instead.
 
 On Linux and macOS there is no console window for Lomora to close: the terminal tab belongs to whatever launched the binary, so it stays until that terminal is closed. `--hidden` is the windowless path there — Lomora re-executes itself in a new session, waits until the dashboard answers on `PORT`, prints the address and the pid, and exits. The detached process writes its pid beside the database (`data/lomora.pid`), so `kill "$(cat data/lomora.pid)"` stops it. For a menu launch with no terminal at all, point a desktop entry at the binary with `Terminal=false` (Linux) or run it from a LaunchAgent or app bundle (macOS); without `--hidden` the process stays in the foreground, as before.
 
@@ -65,7 +65,7 @@ Options are refused rather than ignored: an unknown token prints the full usage 
 
 ### HTTP API
 
-`GET /api/hardware` (its `gpu_status` says why GPU counters are missing: `ok`, `driver_missing`, `no_nvidia`, `unsupported` or `unknown`), `GET /api/version`, `GET /api/models`, `GET|POST /api/profile`, `GET /api/history` (`?limit=&offset=`), `DELETE /api/history/{id}`, `POST /api/test`, `POST /api/stress`, `GET /api/prompts`, `POST /api/prompts/fetch`, `POST /api/sql` and `GET /api/sql/backup` (both gated on `LOMORA_SQL`).
+`GET /api/hardware` (its `gpu_status` says why GPU counters are missing: `ok`, `driver_missing`, `no_nvidia`, `unsupported` or `unknown`), `GET /api/version`, `GET /api/models`, `GET|POST /api/profile`, `GET /api/history` (`?limit=&offset=`), `DELETE /api/history/{id}`, `POST /api/test`, `POST /api/stress`, `GET /api/prompts`, `POST /api/prompts/fetch`, `POST /api/sql` and `GET /api/sql/backup` (both behind the console's switch, which the tray can flip for the session).
 
 ### Configuration
 
@@ -79,7 +79,7 @@ All settings come from environment variables:
 | `LOMORA_DB`     | `data/lomora.db`         | SQLite file for run history and the saved profile (its folder is created when missing). |
 | `LOMORA_STATIC` | *(embedded)*             | Serve the UI from this directory instead of the embedded copy.    |
 | `LOMORA_PROMPTS_URLS` | *(built-in set)*   | Question-pool fetch sources as `category=url` pairs, comma-separated (e.g. `math=https://…/test.jsonl,coding=https://…/data.json.gz`). |
-| `LOMORA_SQL`    | *(off)*                  | Starting state of the CRUD Toolbox raw-SQL console (`POST /api/sql`, `GET /api/sql/backup`); the tray can also toggle it for the current session. Accepts `1`, `true`, `on`, `yes`; anything else, including the variable being unset, leaves it disabled. |
+| `LOMORA_SQL`    | *(off)*                  | Starting state of the CRUD Toolbox SQL console (`POST /api/sql`, `GET /api/sql/backup`); **Settings → Allow SQL CRUD** in the tray toggles the same gate for the current session without a restart. Accepts `1`, `true`, `on`, `yes`; anything else, including the variable being unset, leaves it disabled. |
 | `LOMORA_HIDDEN` | *(off)*                  | Same as `--hidden` (`1`, `true`, `on`, `yes`): close the console window Lomora owns on Windows, start detached on Linux and macOS. |
 
 When a request carries no `base_url`, the base URL is resolved in this order: `LMSTUDIO_URL`, then `OLLAMA_URL`, then `http://localhost:1234`.
@@ -99,7 +99,7 @@ On the development machine (Windows, release build):
 
 | Metric                     | Value     |
 | -------------------------- | --------- |
-| Release binary             | ~8.6 MiB  |
+| Release binary             | ~9.1 MiB  |
 | Working set after startup  | 38-40 MB  |
 | Cold start, first response | 3.1-3.6 s |
 

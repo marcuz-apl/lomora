@@ -12,7 +12,7 @@ pub struct Config {
     /// `(category, url)` pairs the question fetcher samples from; `LOMORA_PROMPTS_URLS`
     /// overrides the built-in benchmark set (`category=url` pairs, comma-separated).
     pub prompts_sources: Vec<(String, String)>,
-    /// `LOMORA_SQL`: the starting state of the raw-SQL console (`POST /api/sql`,
+    /// `LOMORA_SQL`: the starting state of the SQL console (`POST /api/sql`,
     /// `GET /api/sql/backup`), off unless the environment says yes — see `parse_sql_switch`.
     /// Request handlers read the live `SqlGate` built from this value, so the tray can change
     /// it for the session without touching the environment.
@@ -82,7 +82,7 @@ pub fn parse_prompts_sources(env: Option<&str>) -> Vec<(String, String)> {
     if pairs.is_empty() { default_prompts_sources() } else { pairs }
 }
 
-/// `LOMORA_SQL` grammar: one word, trimmed and lower-cased, that opens the raw-SQL console only
+/// `LOMORA_SQL` grammar: one word, trimmed and lower-cased, that opens the SQL console only
 /// when it says yes. `1`, `true`, `on` and `yes` open it; anything else — including `0`, `""` and
 /// a mistyped `ture` — leaves it closed, because the console runs arbitrary row-level SQL and the
 /// safe side of an ambiguous value is off. Pure so both sides are testable without touching the process
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(resolve_base(&cfg, Some("")), "http://lm:1234");
     }
 
-    /// `LOMORA_SQL` is the gate on the raw-SQL console, so the default side matters more than
+    /// `LOMORA_SQL` is the gate on the SQL console, so the default side matters more than
     /// the yes side: unset, blank, `0` and unrecognised text all keep it closed, and only an
     /// explicit yes (case- and whitespace-insensitive) opens it.
     /// The environment is only the starting state. The tray opens and closes the same cell the

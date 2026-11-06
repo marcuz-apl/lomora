@@ -238,7 +238,7 @@
   .about-meta a:hover { text-decoration: underline; }
 
   /* ── CRUD Toolbox ────────────────────────────────────────────────────────────
-     The raw-SQL console that opens beneath the History table. Everything is drawn from the
+     The SQL console that opens beneath the History table. Everything is drawn from the
      theme variables the panels already use (no dark-only --bg-2), so light and dark render the
      same way; the warning box is the shared --warn amber at low alpha, legible on both cards. */
   #crudPanel { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
@@ -605,7 +605,7 @@ async function loadHardware(){
 }
 
 // Every cell is data this page did not write: `model` arrives from the request body, the rest
-// from SQLite — and the CRUD Toolbox below can now write any of them with raw SQL. So all eight
+// from SQLite — and the CRUD Toolbox below can now write any of them with SQL. So all eight
 // values go through esc(), which keeps a stored `<img onerror=…>` a string instead of a live tag
 // (verified: before this, such a model name really did execute). The delete control is the one
 // place a value reaches an attribute rather than text, so it renders only for an integer id —
@@ -683,7 +683,7 @@ function histGo(dir){
 }
 
 // ── CRUD Toolbox ──────────────────────────────────────────────────────────────
-// The raw-SQL console under the History table. The gate lives on the server (LOMORA_SQL), and
+// The SQL console under the History table. The gate lives on the server (LOMORA_SQL), and
 // a disabled console answers its refusal in the usual 200 error envelope rather than a 404, so
 // the panel is offered unconditionally and simply reports what the server said — the UI never
 // guesses at how the binary was started, and never re-implements SQL: it sends text and renders

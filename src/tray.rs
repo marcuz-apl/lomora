@@ -5,7 +5,7 @@
 //! closed the console it owns (double-click, a shortcut, autostart), because that is the launch
 //! where the dashboard would otherwise be reachable only by remembering the address.
 //!
-//! The menu opens the dashboard in the default browser, toggles the raw-SQL console for this
+//! The menu opens the dashboard in the default browser, toggles the SQL console for this
 //! session, shows the product facts, links to the release page, and quits. Quit stops the server
 //! through a channel rather than `process::exit`, so in-flight SQLite writes are allowed to
 //! finish. If the icon cannot be created at all, startup continues exactly as before.

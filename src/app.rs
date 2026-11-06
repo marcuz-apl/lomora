@@ -12,7 +12,7 @@ use crate::store::Db;
 #[derive(Clone)]
 pub struct AppState { pub cfg: Arc<Config>, pub hw: crate::hw::Sampler, pub http: reqwest::Client,
                       pub db: Db, pub sys: crate::hw::ProfileStatic, pub gpu: crate::hw::GpuHandle,
-                      /// Live state of the raw-SQL console; the tray's Settings menu writes it.
+                      /// Live state of the SQL console; the tray's Settings menu writes it.
                       pub sql: SqlGate }
 
 impl AppState {

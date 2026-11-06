@@ -88,7 +88,7 @@ const BREAK_PROFILE_UPDATES: &str = "
 CREATE TRIGGER tests_block_profile_updates BEFORE UPDATE ON profile
 BEGIN SELECT RAISE(ABORT, 'profile writes are blocked by the test'); END;";
 
-/// Page size of the raw-SQL console: one statement's `SELECT` never returns more rows than this,
+/// Page size of the SQL console: one statement's `SELECT` never returns more rows than this,
 /// and `truncated` says when the cut happened. The console is a tool for editing rows, not a way
 /// to stream a whole table through the dashboard.
 pub const SQL_MAX_ROWS: usize = 200;
@@ -377,7 +377,7 @@ impl Db {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Runs a whole SQL script for the raw-SQL console: statements in order, one result each,
+    /// Runs a whole SQL script for the SQL console: statements in order, one result each,
     /// the first failure ending the script. Splitting is SQLite's own — `rusqlite::Batch` walks
     /// the `sqlite3_prepare_v2` tail exactly like the `sqlite3` CLI does, so a semicolon inside
     /// a string literal or a trigger body is never mistaken for a statement end, and a
@@ -903,7 +903,7 @@ mod tests {
         assert_eq!(p.notes, "");
     }
 
-    // ---- the raw-SQL console (store side) ------------------------------------------------
+    // ---- the SQL console (store side) ----------------------------------------------------
     //
     // The console is the one place a caller supplies SQL rather than the crate, so these tests
     // pin the contract the toolbox UI is built on: statements run in order as SQLite sees them,
