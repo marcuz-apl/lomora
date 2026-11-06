@@ -1,6 +1,6 @@
 [package]
 name = "lomora"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 # Required since src/bin/mock_upstream.rs exists: without it `cargo run` refuses to guess
 # between the `lomora` and `mock_upstream` binaries, and plain `cargo run` should start the server.
@@ -42,11 +42,18 @@ chrono = "0.4.45"
 flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
-# The launch console policy in src/console.rs: `GetConsoleProcessList` tells us whether the window
-# belongs to Lomora alone, and `ShowWindow` hides or restores it. The crate is already in the tree
-# (sysinfo depends on it), so this adds no download - only the two feature gates those calls sit
-# behind.
-windows = { version = "0.62", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+# The launch console policy in src/console.rs (`GetConsoleProcessList`, `ShowWindow`) and the
+# notification-area icon in src/tray.rs (`Shell_NotifyIconW`, a GDI-drawn icon, a popup menu, and
+# `ShellExecuteW` to open the dashboard). The crate is already in the tree (sysinfo depends on it),
+# so this adds no download - only the feature gates those calls sit behind.
+windows = { version = "0.62", features = [
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }
 
 [target.'cfg(unix)'.dependencies]
 # One call, `setsid`, for the `--hidden` re-exec in src/console.rs. Also already in the tree (tokio

@@ -65,19 +65,26 @@ pub fn write_pid_file(db_path: &Path) {
 }
 
 /// Windows: apply the console policy for this launch. Called before the server starts, so the
-/// window is already gone by the time the first hardware scan runs.
-pub fn apply_console(mode: Console) {
+/// window is already gone by the time the first hardware scan runs. The return value says whether
+/// this process hid its own console - exactly the launch where a tray icon is the only way back.
+pub fn apply_console(mode: Console) -> bool {
     #[cfg(windows)]
     {
         match windows_plan(mode, win::tenants()) {
-            WinPlan::Hide => win::hide(),
-            WinPlan::Keep => {}
-            WinPlan::KeepShared => println!(
-                "Lomora: this console belongs to your shell, so it stays open. Ctrl+C stops Lomora."),
+            WinPlan::Hide => { win::hide(); true }
+            WinPlan::Keep => false,
+            WinPlan::KeepShared => {
+                println!(
+                    "Lomora: this console belongs to your shell, so it stays open. Ctrl+C stops Lomora.");
+                false
+            }
         }
     }
     #[cfg(not(windows))]
-    let _ = mode;
+    {
+        let _ = mode;
+        false
+    }
 }
 
 /// Put a hidden window back, so a startup failure is never invisible. Only does anything when this

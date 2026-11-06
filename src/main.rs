@@ -33,11 +33,12 @@ fn main() -> ExitCode {
     }
 
     // Windows: hide the console when it belongs to this process alone. Doing it before the
-    // hardware sampler starts is what keeps the flash to the window-creation time.
-    lomora::console::apply_console(launch.console);
+    // hardware sampler starts is what keeps the flash to the window-creation time. `hidden` also
+    // decides whether the server gets a tray icon - the same launch has no other way back.
+    let hidden = lomora::console::apply_console(launch.console);
     if launch.daemonized { lomora::console::write_pid_file(&cfg.db_path); }
 
-    match run(cfg) {
+    match run(cfg, hidden) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // A failure nobody can see is worse than the window this whole branch exists to hide.
@@ -52,11 +53,11 @@ fn main() -> ExitCode {
 
 /// The runtime is built here rather than by `#[tokio::main]` because the console and daemon
 /// decisions above must run while the process is still single-threaded.
-fn run(cfg: Config) -> anyhow::Result<()> {
-    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve(cfg))
+fn run(cfg: Config, hidden: bool) -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve(cfg, hidden))
 }
 
-async fn serve(cfg: Config) -> anyhow::Result<()> {
+async fn serve(cfg: Config, hidden: bool) -> anyhow::Result<()> {
     let port = cfg.port;
     // GPU index 0 only; NVML absent -> NoGpu, which answers with the GPU keys missing rather
     // than with nulls. The handle re-checks for NVML on a slow cadence, so a driver installed
@@ -82,7 +83,20 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     let state = lomora::app::AppState::new(cfg, hw, http, db, sys, gpu);
     let router = lomora::app::build_router(state);
     let addr = format!("0.0.0.0:{port}");
+    // Bound first: a tray icon pointing at a port nobody serves would be worse than no icon.
+    let listener = TcpListener::bind(&addr).await?;
     println!("Lomora listening on http://{addr}");
-    axum::serve(TcpListener::bind(&addr).await?, router).await?;
+    // The tray exists only where the console was hidden. Its Quit stops the server through the
+    // channel, so `with_graceful_shutdown` lets in-flight requests (and SQLite writes) finish
+    // instead of cutting the process off mid-write.
+    let quit = lomora::tray::start(hidden, port);
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            match quit {
+                Some(receiver) => { let _ = receiver.await; }
+                None => std::future::pending::<()>().await,
+            }
+        })
+        .await?;
     Ok(())
 }

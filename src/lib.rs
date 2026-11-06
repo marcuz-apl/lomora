@@ -11,3 +11,4 @@ pub mod models;
 pub mod prompts;
 pub mod routes;
 pub mod store;
+pub mod tray;
