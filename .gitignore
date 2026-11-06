@@ -6,3 +6,7 @@
 
 target/
 *.db
+
+# Runtime state, never source: the SQLite database, its ad-hoc backups, journals and the
+# Unix daemon's pid file. Created on first run beside the working directory.
+data/

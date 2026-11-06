@@ -11,7 +11,7 @@ pub enum Action { Run, Help }
 /// What the user asked for regarding the terminal this process is attached to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Console {
-    /// Hide the console when it belongs to Lomora alone; leave a shared terminal untouched.
+    /// Close the console when it belongs to Lomora alone; leave a shared terminal untouched.
     Auto,
     /// The user explicitly asked for no window (`--hidden`, `LOMORA_HIDDEN=1`).
     Hidden,
@@ -33,11 +33,11 @@ Lomora - local LLM benchmark dashboard
 Usage: lomora [OPTIONS]
 
 Options:
-  --hidden    Windows: hide the console window when Lomora owns it (a console shared
-              with your shell is left alone).
+  --hidden    Windows: close the console Lomora owns, so it runs in the tray only (a
+              console shared with your shell is left alone).
               Linux and macOS: start detached in the background and exit once the
               dashboard answers; the pid goes to lomora.pid beside the database.
-  --console   Never hide the console window, even on double-click (Windows only).
+  --console   Never close the console window, even on double-click (Windows only).
   --help      Show this message and exit.
 
 Environment:

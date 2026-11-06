@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -10,9 +12,10 @@ pub struct Config {
     /// `(category, url)` pairs the question fetcher samples from; `LOMORA_PROMPTS_URLS`
     /// overrides the built-in benchmark set (`category=url` pairs, comma-separated).
     pub prompts_sources: Vec<(String, String)>,
-    /// `LOMORA_SQL`: the raw-SQL console (`POST /api/sql`, `GET /api/sql/backup`). Off unless the
-    /// environment says yes, because it hands anyone who can reach the dashboard the whole
-    /// database — see `parse_sql_switch`.
+    /// `LOMORA_SQL`: the starting state of the raw-SQL console (`POST /api/sql`,
+    /// `GET /api/sql/backup`), off unless the environment says yes — see `parse_sql_switch`.
+    /// Request handlers read the live `SqlGate` built from this value, so the tray can change
+    /// it for the session without touching the environment.
     pub sql_console: bool,
 }
 
@@ -81,12 +84,34 @@ pub fn parse_prompts_sources(env: Option<&str>) -> Vec<(String, String)> {
 
 /// `LOMORA_SQL` grammar: one word, trimmed and lower-cased, that opens the raw-SQL console only
 /// when it says yes. `1`, `true`, `on` and `yes` open it; anything else — including `0`, `""` and
-/// a mistyped `ture` — leaves it closed, because the console runs arbitrary SQL and the safe side
-/// of an ambiguous value is off. Pure so both sides are testable without touching the process
+/// a mistyped `ture` — leaves it closed, because the console runs arbitrary row-level SQL and the
+/// safe side of an ambiguous value is off. Pure so both sides are testable without touching the process
 /// environment.
 pub fn parse_sql_switch(env: Option<&str>) -> bool {
     matches!(env.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
              Some("1" | "true" | "on" | "yes"))
+}
+
+/// The live state of the `LOMORA_SQL` gate. `Config::sql_console` is only the starting point:
+/// the routes read this cell on every request, so the tray menu can open or close the console
+/// for the life of the process. Cloning shares the cell, which is how one `SqlGate` reaches both
+/// the server state and the tray thread. Its scope is deliberately session-only — the
+/// environment remains the source of truth for the next launch.
+#[derive(Clone, Debug)]
+pub struct SqlGate(Arc<AtomicBool>);
+
+impl SqlGate {
+    pub fn new(open: bool) -> SqlGate {
+        SqlGate(Arc::new(AtomicBool::new(open)))
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn set(&self, open: bool) {
+        self.0.store(open, Ordering::Relaxed);
+    }
 }
 
 /// The server-side default when a request omits `base_url`: an explicit `LMSTUDIO_URL` wins,
@@ -118,7 +143,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, default_base, normalize_base, resolve_base};
+    use super::{Config, SqlGate, default_base, normalize_base, resolve_base};
     use std::path::PathBuf;
 
     // This pins the one place `OLLAMA_URL` is honoured. `from_env` feeds
@@ -193,6 +218,19 @@ mod tests {
     /// `LOMORA_SQL` is the gate on the raw-SQL console, so the default side matters more than
     /// the yes side: unset, blank, `0` and unrecognised text all keep it closed, and only an
     /// explicit yes (case- and whitespace-insensitive) opens it.
+    /// The environment is only the starting state. The tray opens and closes the same cell the
+    /// request handlers read, so a clone is the server's view, not a copy.
+    #[test]
+    fn the_sql_gate_can_be_opened_and_closed_at_runtime() {
+        let gate = SqlGate::new(false);
+        assert!(!gate.enabled(), "the environment default is the starting state");
+        gate.set(true);
+        assert!(gate.enabled(), "the tray can open the console without a restart");
+        let server_view = gate.clone();
+        server_view.set(false);
+        assert!(!gate.enabled(), "a clone shares the cell, so the change reaches every reader");
+    }
+
     #[test]
     fn the_sql_console_stays_off_until_the_env_says_yes() {
         use super::parse_sql_switch;

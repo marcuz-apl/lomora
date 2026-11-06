@@ -83,6 +83,16 @@ pub async fn spawn_router(app: axum::Router) -> (String, tokio::task::JoinHandle
 async fn spawn_app_with(cfg: lomora::config::Config, db: lomora::store::Db)
     -> (String, tokio::task::JoinHandle<()>)
 {
+    let (base, handle, _state) = spawn_cfg_on_db_with_state(cfg, db).await;
+    (base, handle)
+}
+
+/// Like `spawn_cfg_on_db`, but hands back a clone of the `AppState` the server is serving from.
+/// The SQL gate lives in that state, so a test can flip it exactly as the tray does and prove the
+/// request handlers see the change on the same process.
+pub async fn spawn_cfg_on_db_with_state(
+    cfg: lomora::config::Config, db: lomora::store::Db,
+) -> (String, tokio::task::JoinHandle<()>, lomora::app::AppState) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -103,10 +113,11 @@ async fn spawn_app_with(cfg: lomora::config::Config, db: lomora::store::Db)
     // `default_profile_name_is_my_workstation` asserts.
     let sys = lomora::hw::read_profile_static();
     let state = lomora::app::AppState::new(cfg, hw, http, db, sys, gpu);
+    let served = state.clone();
     let handle = tokio::spawn(async move {
-        axum::serve(listener, lomora::app::build_router(state)).await.unwrap();
+        axum::serve(listener, lomora::app::build_router(served)).await.unwrap();
     });
-    (format!("http://{addr}"), handle)
+    (format!("http://{addr}"), handle, state)
 }
 
 /// A mock that counts simultaneous in-flight completions and reports the peak at `/__peak`.

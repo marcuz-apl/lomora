@@ -35,10 +35,11 @@ async fn rows_appear_oldest_first_with_eight_keys_id_first() {
             obj["timestamp"]);
 }
 
-/// `provider` is never stored: `RunRow::to_history_json` derives it from `base_url` at
-/// serialization. A single run that discards the resolved upstream therefore reaches the
-/// dashboard as `"provider": null` and renders `—`. The mock's ephemeral port maps to
-/// `Custom`, so the wire value also proves the mapping ran on the persisted URL.
+/// `provider` is written beside `base_url` at insert and read back literally, so the History
+/// table's label survives a restart without re-deriving it. A single run that discards the
+/// resolved upstream would reach the dashboard as `"provider": null` and render `—`. The mock's
+/// ephemeral port maps to `Custom`, so the wire value also proves the mapping ran on the URL
+/// that reached SQLite — both columns are checked below.
 #[tokio::test]
 async fn single_runs_persist_the_upstream_so_history_carries_a_provider() {
     let (mock, _m) = spawn_mock().await;
@@ -56,6 +57,8 @@ async fn single_runs_persist_the_upstream_so_history_carries_a_provider() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].base_url.as_deref(), Some(mock.as_str()),
                "the URL itself must reach SQLite, not just the derived label");
+    assert_eq!(rows[0].provider.as_deref(), Some("Custom"),
+               "the label must be a stored column, not a read-time derivation");
 }
 
 /// Deleting one row removes exactly that row — by its database id, not by a (timestamp,

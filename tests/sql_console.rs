@@ -1,5 +1,5 @@
 mod support;
-use support::spawn_cfg_on_db;
+use support::{spawn_cfg_on_db, spawn_cfg_on_db_with_state};
 use serde_json::{json, Value};
 
 /// A `Config` with the console switch set explicitly. `Config::from_env()` would honour
@@ -43,6 +43,45 @@ async fn a_server_without_the_switch_refuses_and_executes_nothing() {
     assert_ne!(r.status(), 404, "a disabled console refuses, it does not hide the route");
 }
 
+/// The gate is not frozen at startup: the tray menu writes the same cell the handlers read, so
+/// the console opens and closes without a restart. Both directions are proven against the live
+/// server and the store handle it is serving from — an open gate that still refuses, or a closed
+/// gate that runs the statement anyway, fails here.
+#[tokio::test]
+async fn the_sql_gate_can_be_flipped_at_runtime_without_a_restart() {
+    let db = lomora::store::Db::in_memory();
+    let (base, _h, state) = spawn_cfg_on_db_with_state(cfg(false), db.clone()).await;
+    let c = reqwest::Client::new();
+
+    let body: Value = c.post(format!("{base}/api/sql"))
+        .json(&json!({"sql": "CREATE TABLE tray_opened (a)"}))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(body["error"].is_string(), "closed at startup, got {body}");
+
+    // Exactly what the tray's Settings item does.
+    state.sql.set(true);
+    let body: Value = c.post(format!("{base}/api/sql"))
+        .json(&json!({"sql": "CREATE TABLE tray_opened (a)"}))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(body["statements"][0]["error"].is_null(), "opened by the tray, got {body}");
+    assert_eq!(table_count(&db, "tray_opened").await, 1, "an opened console runs the script");
+
+    state.sql.set(false);
+    let body: Value = c.post(format!("{base}/api/sql"))
+        .json(&json!({"sql": "CREATE TABLE tray_closed (a)"}))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(body["error"].is_string(), "closed again, got {body}");
+    assert_eq!(table_count(&db, "tray_closed").await, 0, "a closed console runs nothing");
+}
+
+async fn table_count(db: &lomora::store::Db, name: &str) -> i64 {
+    let result = db.run_sql(
+        &format!("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='{name}'"),
+        lomora::store::SQL_BUDGET,
+    ).await.unwrap();
+    result[0].rows[0][0].as_i64().unwrap()
+}
+
 /// The console runs a whole script and answers one result per statement, in order: DDL, then a
 /// write with its `changes`, then a read with its `columns` and `rows`.
 #[tokio::test]
@@ -65,6 +104,91 @@ async fn an_enabled_console_answers_one_result_per_statement() {
     assert_eq!(statements[2]["columns"], json!(["a"]));
     assert_eq!(statements[2]["rows"], json!([[7], [8]]));
     assert!(statements.iter().all(|s| s["error"].is_null()), "{body}");
+}
+
+/// The console may edit data but not destroy schema. SQLite's authorizer refuses these at
+/// prepare time, so quoting or comments cannot dodge the check, and nothing runs: the table,
+/// index, view, trigger, column and row below must all survive. Every `DROP`, every `ALTER TABLE`
+/// (add, drop column, rename) is refused. ATTACH is refused too — the console edits Lomora's
+/// database, not an arbitrary file — and `writable_schema` would bypass every table-level check
+/// if it were allowed.
+#[tokio::test]
+async fn the_console_refuses_schema_destructive_statements() {
+    let db = lomora::store::Db::in_memory();
+    let (base, _h) = spawn_cfg_on_db(cfg(true), db).await;
+    async fn sql(base: &str, script: &str) -> Value {
+        reqwest::Client::new().post(format!("{base}/api/sql"))
+            .json(&json!({"sql": script})).send().await.unwrap().json().await.unwrap()
+    }
+    // `t2` has a spare column so `DROP COLUMN` is a *valid* ALTER: on a one-column table SQLite
+    // refuses it by itself before the authorizer is ever asked, which would prove nothing.
+    let seeded = sql(&base, "CREATE TABLE t (a INTEGER);
+                             CREATE INDEX t_a ON t (a);
+                             CREATE VIEW v AS SELECT a FROM t;
+                             CREATE TRIGGER tr AFTER INSERT ON t BEGIN UPDATE t SET a = a; END;
+                             INSERT INTO t VALUES (1);
+                             CREATE TABLE t2 (a INTEGER, b INTEGER);
+                             INSERT INTO t2 VALUES (1, 2)").await;
+    assert!(seeded["statements"].as_array().unwrap().iter()
+                .all(|s| s["error"].is_null()), "{seeded}");
+
+    let attach_target = std::env::temp_dir()
+        .join(format!("lomora-guard-attach-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&attach_target);
+    let attach = format!("ATTACH DATABASE '{}' AS extra", attach_target.display());
+    for script in [
+        "DROP TABLE t",
+        "ALTER TABLE t ADD COLUMN b INTEGER",
+        "ALTER TABLE t2 DROP COLUMN b",
+        "ALTER TABLE t2 RENAME TO t3",
+        "DROP INDEX t_a",
+        "DROP VIEW v",
+        "DROP TRIGGER tr",
+        attach.as_str(),
+        "PRAGMA writable_schema = ON",
+    ] {
+        let body = sql(&base, script).await;
+        let err = body["statements"][0]["error"].as_str().unwrap_or_default();
+        assert!(err.to_ascii_lowercase().contains("not authori"),
+                "{script} must be refused, got {body}");
+    }
+    assert!(!attach_target.exists(), "a refused ATTACH must not create the file");
+
+    let survived = sql(&base, "SELECT count(*) FROM sqlite_master
+                               WHERE name IN ('t','t_a','v','tr')").await;
+    assert_eq!(survived["statements"][0]["rows"], json!([[4]]),
+               "refused statements must change nothing: {survived}");
+    let rows = sql(&base, "SELECT count(*) FROM t").await;
+    assert_eq!(rows["statements"][0]["rows"], json!([[1]]), "the row must survive: {rows}");
+    let columns = sql(&base, "SELECT name FROM pragma_table_info('t2') ORDER BY cid").await;
+    assert_eq!(columns["statements"][0]["rows"], json!([["a"], ["b"]]),
+               "DROP COLUMN must leave the column in place: {columns}");
+    let readable = sql(&base, "PRAGMA writable_schema").await;
+    assert_eq!(readable["statements"][0]["rows"], json!([[0]]),
+               "reading the pragma is not a schema change: {readable}");
+}
+
+/// The guard stops schema destruction, not the toolbox's job: reading, inserting, updating and
+/// deleting rows — and creating an index — all run as typed.
+#[tokio::test]
+async fn ordinary_crud_still_runs_with_the_guard_on() {
+    let db = lomora::store::Db::in_memory();
+    let (base, _h) = spawn_cfg_on_db(cfg(true), db).await;
+    let body: Value = reqwest::Client::new().post(format!("{base}/api/sql"))
+        .json(&json!({"sql": "CREATE TABLE w (a INTEGER, b TEXT);
+                             INSERT INTO w VALUES (1,'x');
+                             UPDATE w SET b = 'y' WHERE a = 1;
+                             DELETE FROM w WHERE a = 1;
+                             INSERT INTO w VALUES (2,'z');
+                             CREATE INDEX w_a ON w (a);
+                             SELECT a, b FROM w"}))
+        .send().await.unwrap().json().await.unwrap();
+    let statements = body["statements"].as_array().unwrap();
+    assert!(statements.iter().all(|s| s["error"].is_null()), "{body}");
+    assert_eq!(statements[1]["changes"], json!(1));
+    assert_eq!(statements[2]["changes"], json!(1));
+    assert_eq!(statements[3]["changes"], json!(1));
+    assert_eq!(statements[6]["rows"], json!([[2, "z"]]), "{body}");
 }
 
 /// A statement error is the console's output, not a transport failure: HTTP 200 with the SQLite

@@ -134,9 +134,10 @@ impl ProfileOut {
     }
 }
 
-/// Body of `POST /api/sql`: the script text, required. Nothing else — the console is deliberately
-/// unfiltered, because `LOMORA_SQL` is the gate and the operator's promise is raw SQL. The type
-/// check exists so a non-string (or a missing field) is the shared 422 rather than a 200 error.
+/// Body of `POST /api/sql`: the script text, required. Nothing else — the console is a row-level
+/// tool behind `LOMORA_SQL`, and the schema guard lives in `store::sql_authorizer`, not in this
+/// body. The type check exists so a non-string (or a missing field) is the shared 422 rather than
+/// a 200 error.
 #[derive(Deserialize, Clone, Debug)]
 pub struct SqlReq { pub sql: String }
 

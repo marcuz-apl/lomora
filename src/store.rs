@@ -22,6 +22,10 @@ pub struct RunRow {
     pub kind: String, pub timestamp: String, pub model: String, pub max_tokens: i64,
     pub ttft_ms: Option<f64>, pub total_s: f64, pub tokens: i64, pub tok_per_s: f64,
     pub concurrency: Option<i64>, pub base_url: Option<String>,
+    /// The label written beside `base_url` when the row was inserted. Filled by reads, like `id`;
+    /// `insert_run` ignores a caller-set value and writes its own derivation from `base_url`, so
+    /// the two columns cannot disagree.
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,14 +43,15 @@ impl RunRow {
     /// A history entry carries the seven wire keys in insertion order, led by `id` — the
     /// database identity the dashboard's per-row delete targets; a (timestamp, model) pair
     /// would be ambiguous when one model is benchmarked twice in the same second. `kind`,
-    /// `concurrency` and `base_url` are internal columns and never reach the wire. A `None`
-    /// `ttft_ms` stays a present null key — stress rows answer `"ttft_ms": null`, not a
-    /// missing field.
+    /// `concurrency` and `base_url` are internal columns and never reach the wire; `provider`
+    /// is the label stored with the row, so an edit through the SQL console changes what the
+    /// dashboard shows. A `None` `ttft_ms` stays a present null key — stress rows answer
+    /// `"ttft_ms": null`, not a missing field.
     pub fn to_history_json(&self) -> serde_json::Value {
         serde_json::json!({
             "id": self.id,
             "timestamp": self.timestamp,
-            "provider": self.base_url.as_deref().map(provider_name),
+            "provider": self.provider,
             "model": self.model,
             "max_tokens": self.max_tokens,
             "ttft_ms": self.ttft_ms,
@@ -66,7 +71,7 @@ impl Profile {
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('single','stress')),
-  created_at TEXT NOT NULL, timestamp TEXT NOT NULL, model TEXT NOT NULL,
+  created_at TEXT NOT NULL, timestamp TEXT NOT NULL, provider TEXT, model TEXT NOT NULL,
   max_tokens INTEGER NOT NULL, ttft_ms REAL, total_s REAL NOT NULL,
   tokens INTEGER NOT NULL, tok_per_s REAL NOT NULL, concurrency INTEGER, base_url TEXT);
 CREATE TABLE IF NOT EXISTS profile (
@@ -171,6 +176,51 @@ impl Db {
         // concurrent reader to benefit from it, and it would drop `-wal`/`-shm` sidecar files
         // beside the user's `lomora.db` that nothing else in the project creates.
         conn.execute_batch(SCHEMA)?;
+        // The provider label used to be derived at read time; it is a column now. An existing
+        // database gets it here: one ALTER on the first open after the upgrade, then the UPDATE
+        // fills rows written before the column existed. Only NULLs are filled, so a label edited
+        // through the SQL console survives every later open. Both steps are no-ops once done.
+        let has_provider: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name = 'provider')",
+            [], |r| r.get(0))?;
+        if !has_provider {
+            conn.execute("ALTER TABLE runs ADD COLUMN provider TEXT", [])?;
+        }
+        conn.execute(
+            "UPDATE runs SET provider = CASE \
+                 WHEN base_url LIKE '%:1234%' THEN 'LM Studio' \
+                 WHEN base_url LIKE '%:11434%' THEN 'Ollama' \
+                 WHEN base_url LIKE '%:4788%' THEN 'Moderado' \
+                 WHEN base_url LIKE '%:9931%' THEN 'llama.cpp' \
+                 ELSE 'Custom' END \
+             WHERE provider IS NULL AND base_url IS NOT NULL", [])?;
+        // `provider` belongs immediately before `model`, but SQLite cannot move a column and an
+        // upgraded table has it appended at the end. Such a table is rebuilt once: renaming it
+        // lets `SCHEMA` create the declared layout, the rows are copied across carrying their
+        // stored labels, and the old table is dropped — in one transaction, so a failure leaves
+        // the original intact.
+        let order: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('runs')")?;
+            let names = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            names.collect::<Result<_, _>>()?
+        };
+        let provider_at = order.iter().position(|c| c == "provider");
+        let model_at = order.iter().position(|c| c == "model")
+            .expect("the runs table always declares model");
+        if provider_at != model_at.checked_sub(1) {
+            conn.execute_batch(&format!(
+                "BEGIN IMMEDIATE;\
+                 DROP TABLE IF EXISTS runs_legacy;\
+                 ALTER TABLE runs RENAME TO runs_legacy;\
+                 {SCHEMA}\
+                 INSERT INTO runs (id, kind, created_at, timestamp, provider, model, max_tokens, \
+                                   ttft_ms, total_s, tokens, tok_per_s, concurrency, base_url) \
+                   SELECT id, kind, created_at, timestamp, provider, model, max_tokens, ttft_ms, \
+                          total_s, tokens, tok_per_s, concurrency, base_url \
+                     FROM runs_legacy;\
+                 DROP TABLE runs_legacy;\
+                 COMMIT;"))?;
+        }
         // One-time normalization for tables written before the history stamp widened from
         // `%H:%M:%S` to `%Y-%m-%d %H:%M:%S`: the calendar date only ever lived in `created_at`
         // (the RFC 3339 local stamp written beside every row), so legacy rows get that date
@@ -217,11 +267,15 @@ impl Db {
         let (kind, ts, model, mt, ttft, total, tok, tps, conc, base) = (
             r.kind.clone(), r.timestamp.clone(), r.model.clone(), r.max_tokens, r.ttft_ms,
             r.total_s, r.tokens, r.tok_per_s, r.concurrency, r.base_url.clone());
+        // The label is written here, once, so the column and the upstream it describes cannot
+        // drift; `r.provider` is a read-side value and is deliberately ignored.
+        let provider = r.base_url.as_deref().map(provider_name);
         let created = chrono::Local::now().to_rfc3339();
         let c = self.0.clone(); let g = c.lock().await;
         g.execute("INSERT INTO runs (kind, created_at, timestamp, model, max_tokens, ttft_ms, \
-                   total_s, tokens, tok_per_s, concurrency, base_url) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-            params![kind, created, ts, model, mt, ttft, total, tok, tps, conc, base])?;
+                   total_s, tokens, tok_per_s, concurrency, base_url, provider) \
+                   VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![kind, created, ts, model, mt, ttft, total, tok, tps, conc, base, provider])?;
         Ok(())
     }
     /// ORDER BY id DESC LIMIT n, then reversed: the API answers oldest-first and keeps that
@@ -238,12 +292,13 @@ impl Db {
         let c = self.0.clone(); let g = c.lock().await;
         let total: i64 = g.query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))?;
         let mut stmt = g.prepare("SELECT id, kind, timestamp, model, max_tokens, ttft_ms, total_s, \
-                   tokens, tok_per_s, concurrency, base_url FROM runs ORDER BY id DESC LIMIT ?1 OFFSET ?2")?;
+                   tokens, tok_per_s, concurrency, base_url, provider FROM runs \
+                   ORDER BY id DESC LIMIT ?1 OFFSET ?2")?;
         let rows = stmt.query_map(params![limit, offset], |row| Ok(RunRow {
             id: row.get(0)?, kind: row.get(1)?, timestamp: row.get(2)?, model: row.get(3)?,
             max_tokens: row.get(4)?, ttft_ms: row.get(5)?, total_s: row.get(6)?,
             tokens: row.get(7)?, tok_per_s: row.get(8)?, concurrency: row.get(9)?,
-            base_url: row.get(10)?,
+            base_url: row.get(10)?, provider: row.get(11)?,
         }))?;
         let mut out = rows.collect::<Result<Vec<_>, _>>()?;
         out.reverse();
@@ -327,12 +382,14 @@ impl Db {
     /// the `sqlite3_prepare_v2` tail exactly like the `sqlite3` CLI does, so a semicolon inside
     /// a string literal or a trigger body is never mistaken for a statement end, and a
     /// multi-statement text that `Connection::prepare` rejects with `MultipleStatement` runs
-    /// fine. The text is not filtered: reaching this method means the operator chose
-    /// `LOMORA_SQL`, and the promise of that switch is raw SQL, `DROP TABLE` included.
+    /// fine. Rows are the tool's business — `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `CREATE`
+    /// all run — but the schema is not: the whole script is prepared under the `sql_authorizer`
+    /// guard, so a `DROP TABLE` is refused by SQLite itself rather than by scanning the text.
     ///
     /// Errors that are *about a statement* come back inside `SqlResult::error` — they are the
-    /// console's output, not a transport failure. Only SQLite refusing to install the progress
-    /// handler reaches the `anyhow::Result`.
+    /// console's output, not a transport failure, and a guard refusal arrives the same way. Only
+    /// SQLite refusing to install the progress handler or the authorizer reaches the
+    /// `anyhow::Result`.
     pub async fn run_sql(&self, script: &str, budget: std::time::Duration)
         -> anyhow::Result<Vec<SqlResult>>
     {
@@ -354,11 +411,17 @@ impl Db {
         // Armed after the install, and from this moment: the task may have queued behind a
         // benchmark for the connection, and the budget covers the script, not the wait.
         deadline.store(elapsed_ms() + budget.as_millis() as i64, Relaxed);
+        // The schema guard comes on for the script and off again with it. SQLite consults it at
+        // prepare time, per parsed statement, so `DROP TABLE` is refused by the database before
+        // it can run — no text matching, and comments, quoting and casing cannot sneak past it.
+        g.authorizer(Some(sql_authorizer))?;
         let out = run_script(&g, script);
         deadline.store(0, Relaxed);
-        // The handler comes off with the run, so ordinary dashboard queries pay nothing for a
-        // tool they never use. Any flag the last statement picked up on its way out is spent
-        // here, on a query of our own, rather than on the dashboard's next read.
+        // Both hooks come off with the run, so ordinary dashboard queries pay nothing for a tool
+        // they never use — and the dashboard's own writes are never refused by the guard. Any
+        // flag the last statement picked up on its way out is spent here, on a query of our own,
+        // rather than on the dashboard's next read.
+        g.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>)?;
         g.progress_handler(0, None::<fn() -> bool>)?;
         for _ in 0..3 {
             if !g.is_interrupted() { break; }
@@ -392,6 +455,35 @@ impl Db {
         // silently grows one per retry in the user's temp folder.
         std::fs::remove_file(&tmp).ok();
         out
+    }
+}
+
+/// The console's schema guard, installed on the connection only for the length of one script.
+/// SQLite's authorizer is asked about each action of each statement as it is prepared, so this
+/// decision comes from the parsed statement — a `DROP TABLE` hidden in a comment, a string, a
+/// trigger body or different casing is still a `DROP TABLE`.
+///
+/// Rows are the console's business: `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `CREATE` are
+/// allowed. The schema is not: every `DROP` (table, index, view or trigger, temporary included),
+/// `ALTER TABLE`, and a write to `PRAGMA writable_schema` (which would edit `sqlite_master`
+/// directly) is denied. `ATTACH`/`DETACH` are denied with them — another database file is
+/// another schema to destroy, and the guard cannot see inside it. A reading
+/// `PRAGMA writable_schema` stays allowed; only the write is refused.
+fn sql_authorizer(ctx: rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization {
+    use rusqlite::hooks::{AuthAction as Action, Authorization as Verdict};
+    match ctx.action {
+        Action::DropTable { .. } | Action::DropTempTable { .. }
+        | Action::DropIndex { .. } | Action::DropTempIndex { .. }
+        | Action::DropView { .. } | Action::DropTempView { .. }
+        | Action::DropTrigger { .. } | Action::DropTempTrigger { .. }
+        | Action::AlterTable { .. }
+        | Action::Attach { .. } | Action::Detach { .. } => Verdict::Deny,
+        Action::Pragma { pragma_name, pragma_value }
+            if pragma_value.is_some() && pragma_name.eq_ignore_ascii_case("writable_schema") =>
+            Verdict::Deny,
+        // The enum is `#[non_exhaustive]`: a future SQLite action we have not classified is
+        // allowed, which keeps this guard a schema guard rather than a general lock.
+        _ => Verdict::Allow,
     }
 }
 
@@ -518,10 +610,11 @@ mod tests {
         assert_eq!(rows, 1, "the seed must not add a second row on reopen");
     }
 
-    /// `insert_run` binds eleven parameters and `recent_runs` reads ten back, so every field is
+    /// `insert_run` binds twelve parameters and `recent_runs` reads twelve back, so every field is
     /// given a distinct value here: a shifted `params!` or `row.get(n)` position shows up in the
-    /// `Debug` diff instead of passing unnoticed. The eleventh (`created_at`) is not in `RunRow`
-    /// and is checked against the connection directly.
+    /// `Debug` diff instead of passing unnoticed. `created_at` is not in `RunRow` and is checked
+    /// against the connection directly. `provider` is written by `insert_run`
+    /// from `base_url`, so the expected rows carry the label that derivation produces.
     #[tokio::test]
     async fn runs_round_trip_oldest_first_with_every_column_in_its_field() {
         let f = TempDb::new("runs");
@@ -531,16 +624,19 @@ mod tests {
         let first = RunRow { id: 1, kind: "single".into(), timestamp: "09:41:03".into(),
             model: "model-one".into(), max_tokens: 128, ttft_ms: Some(41.5), total_s: 1.25,
             tokens: 64, tok_per_s: 51.2, concurrency: Some(1),
-            base_url: Some("http://127.0.0.1:1234".into()) };
-        // The middle row keeps the two NULL-able columns as `None` — the shape of a single run
+            base_url: Some("http://127.0.0.1:1234".into()),
+            provider: Some("LM Studio".into()) };
+        // The middle row keeps the NULL-able columns as `None` — the shape of a single run
         // with no concurrency field and no base URL.
         let second = RunRow { id: 2, kind: "stress".into(), timestamp: "09:41:09".into(),
             model: "model-two".into(), max_tokens: 256, ttft_ms: None, total_s: 2.5,
-            tokens: 128, tok_per_s: 102.4, concurrency: None, base_url: None };
+            tokens: 128, tok_per_s: 102.4, concurrency: None, base_url: None,
+            provider: None };
         let third = RunRow { id: 3, kind: "single".into(), timestamp: "09:41:15".into(),
             model: "model-three".into(), max_tokens: 512, ttft_ms: Some(404.75), total_s: 3.75,
             tokens: 192, tok_per_s: 204.8, concurrency: Some(4),
-            base_url: Some("http://127.0.0.1:11434".into()) };
+            base_url: Some("http://127.0.0.1:11434".into()),
+            provider: Some("Ollama".into()) };
         for mut r in [first.clone(), second.clone(), third.clone()] { r.id = 0; db.insert_run(&r).await.unwrap(); }
 
         // `ORDER BY id DESC LIMIT 2` then `reverse()` == the last two rows, oldest-first.
@@ -561,11 +657,134 @@ mod tests {
             .unwrap_or_else(|e| panic!("?2 must be an RFC 3339 stamp, got {created_at:?}: {e}"));
     }
 
+    /// The provider is a stored column now: `insert_run` writes the label the History table
+    /// renders, instead of `to_history_json` deriving it from `base_url` on every read.
+    #[tokio::test]
+    async fn insert_run_stores_the_provider_label_beside_the_upstream() {
+        let f = TempDb::new("provider-insert");
+        let db = Db::open(&f.path).unwrap();
+        db.insert_run(&RunRow { id: 0, kind: "single".into(),
+            timestamp: "2026-11-06 09:00:00".into(), model: "m".into(), max_tokens: 8,
+            ttft_ms: None, total_s: 1.0, tokens: 8, tok_per_s: 8.0, concurrency: None,
+            base_url: Some("http://127.0.0.1:1234".into()), provider: None }).await.unwrap();
+        let stored: Option<String> = {
+            let g = db.0.lock().await;
+            g.query_row("SELECT provider FROM runs", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(stored.as_deref(), Some("LM Studio"),
+                   "the label must be written literally, not derived at read time");
+        // The wire value comes from the column too: a label changed in the SQL console is what
+        // the History table shows on the next read.
+        { let g = db.0.lock().await;
+          g.execute("UPDATE runs SET provider = 'Edited'", []).unwrap(); }
+        let rows = db.recent_runs(1).await.unwrap();
+        assert_eq!(rows[0].to_history_json()["provider"], "Edited",
+                   "history JSON must read the stored label, not re-derive it from base_url");
+    }
+
+    /// A `runs` table created before the provider column existed gains it on the next `open()`,
+    /// with every stored `base_url` mapped to the label the History table renders. Rows with no
+    /// upstream keep NULL, and a label edited through the SQL console survives a reopen.
+    #[tokio::test]
+    async fn an_old_runs_table_gains_a_backfilled_provider_column() {
+        let f = TempDb::new("provider-migrate");
+        {
+            // The pre-provider schema, exactly what shipped before this change.
+            let conn = Connection::open(&f.path).unwrap();
+            conn.execute_batch("\
+                CREATE TABLE runs (
+                  id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('single','stress')),
+                  created_at TEXT NOT NULL, timestamp TEXT NOT NULL, model TEXT NOT NULL,
+                  max_tokens INTEGER NOT NULL, ttft_ms REAL, total_s REAL NOT NULL,
+                  tokens INTEGER NOT NULL, tok_per_s REAL NOT NULL, concurrency INTEGER,
+                  base_url TEXT);
+                INSERT INTO runs (kind, created_at, timestamp, model, max_tokens, total_s,
+                                  tokens, tok_per_s, base_url) VALUES
+                  ('single','2026-11-05T09:41:03+08:00','2026-11-05 09:41:03','a',8,1.0,8,8.0,'http://127.0.0.1:1234'),
+                  ('single','2026-11-05T09:41:04+08:00','2026-11-05 09:41:04','b',8,1.0,8,8.0,'http://127.0.0.1:11434'),
+                  ('single','2026-11-05T09:41:05+08:00','2026-11-05 09:41:05','c',8,1.0,8,8.0,'http://elsewhere:9999'),
+                  ('single','2026-11-05T09:41:06+08:00','2026-11-05 09:41:06','d',8,1.0,8,8.0,NULL);")
+                .unwrap();
+        }
+        let db = Db::open(&f.path).unwrap();
+        let stored: Vec<Option<String>> = {
+            let g = db.0.lock().await;
+            let mut stmt = g.prepare("SELECT provider FROM runs ORDER BY id").unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(stored, vec![Some("LM Studio".into()), Some("Ollama".into()),
+                                Some("Custom".into()), None],
+                   "every stored upstream must be backfilled; a missing one stays NULL");
+        {
+            let g = db.0.lock().await;
+            g.execute("UPDATE runs SET provider = 'Pinned' WHERE model = 'c'", []).unwrap();
+        }
+        drop(db);
+        let again = Db::open(&f.path).unwrap();
+        let pinned: Option<String> = {
+            let g = again.0.lock().await;
+            g.query_row("SELECT provider FROM runs WHERE model = 'c'", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(pinned.as_deref(), Some("Pinned"),
+                   "the backfill must only fill NULLs, never overwrite a chosen label");
+    }
+
     #[tokio::test]
     async fn recent_runs_of_an_empty_table_is_an_empty_vec() {
         let f = TempDb::new("empty");
         let db = Db::open(&f.path).unwrap();
         assert_eq!(db.recent_runs(5).await.unwrap(), Vec::<RunRow>::new());
+    }
+
+    /// `provider` belongs beside `timestamp`, immediately before `model` — the order the
+    /// dashboard and a `SELECT *` in the SQL console read best. A fresh file must declare it
+    /// there, and an upgraded one must arrive at the same layout: SQLite only appends an added
+    /// column and has no statement to move one, so the table is rebuilt.
+    #[tokio::test]
+    async fn provider_column_sits_immediately_before_model_on_fresh_and_upgraded_tables() {
+        async fn column_order(db: &Db) -> Vec<String> {
+            let g = db.0.lock().await;
+            let mut stmt = g.prepare("SELECT name FROM pragma_table_info('runs')").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.collect::<Result<_, _>>().unwrap()
+        }
+        fn provider_then_model(names: &[String]) {
+            let provider = names.iter().position(|c| c == "provider").unwrap();
+            let model = names.iter().position(|c| c == "model").unwrap();
+            assert_eq!(model, provider + 1, "provider must precede model: {names:?}");
+        }
+
+        let fresh_file = TempDb::new("provider-order");
+        let fresh = Db::open(&fresh_file.path).unwrap();
+        provider_then_model(&column_order(&fresh).await);
+
+        // A table that already has the column appended at the end (last session's upgrade) is
+        // the interesting case: it must be rebuilt without losing a label edited by hand.
+        let f = TempDb::new("provider-order-old");
+        {
+            let conn = Connection::open(&f.path).unwrap();
+            conn.execute_batch("\
+                CREATE TABLE runs (
+                  id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('single','stress')),
+                  created_at TEXT NOT NULL, timestamp TEXT NOT NULL, model TEXT NOT NULL,
+                  max_tokens INTEGER NOT NULL, ttft_ms REAL, total_s REAL NOT NULL,
+                  tokens INTEGER NOT NULL, tok_per_s REAL NOT NULL, concurrency INTEGER,
+                  base_url TEXT);
+                INSERT INTO runs (kind, created_at, timestamp, model, max_tokens, total_s,
+                                  tokens, tok_per_s, base_url)
+                  VALUES ('single','2026-11-05T09:41:03+08:00','2026-11-05 09:41:03',
+                          'a',8,1.0,8,8.0,'http://127.0.0.1:11434');
+                ALTER TABLE runs ADD COLUMN provider TEXT;
+                UPDATE runs SET provider = 'Edited';")
+                .unwrap();
+        }
+        let upgraded = Db::open(&f.path).unwrap();
+        provider_then_model(&column_order(&upgraded).await);
+        let row = upgraded.recent_runs(1).await.unwrap().remove(0);
+        assert_eq!(row.provider.as_deref(), Some("Edited"),
+                   "the rebuild must carry the stored label across, not re-derive it");
+        assert_eq!(row.model, "a");
     }
 
     /// A table written before the history stamp widened from `HH:MM:SS` to
@@ -580,7 +799,8 @@ mod tests {
             let db = Db::open(&f.path).unwrap();
             let row = RunRow { id: 0, kind: "single".into(), timestamp: "09:41:03".into(),
                 model: "legacy".into(), max_tokens: 64, ttft_ms: Some(41.5), total_s: 1.25,
-                tokens: 32, tok_per_s: 25.6, concurrency: None, base_url: None };
+                tokens: 32, tok_per_s: 25.6, concurrency: None, base_url: None,
+                provider: None };
             db.insert_run(&row).await.unwrap();
         }
         // Reopening the same file is a restart — the migration runs against the stored row.
@@ -606,7 +826,7 @@ mod tests {
         let db = Db::in_memory();
         let bad = RunRow { id: 0, kind: "banana".into(), timestamp: "09:41:03".into(),
             model: "m".into(), max_tokens: 1, ttft_ms: None, total_s: 1.0, tokens: 1,
-            tok_per_s: 1.0, concurrency: None, base_url: None };
+            tok_per_s: 1.0, concurrency: None, base_url: None, provider: None };
         let err = db.insert_run(&bad).await.unwrap_err();
         let sqlite = err.downcast_ref::<rusqlite::Error>()
             .expect("the CHECK failure must still be a rusqlite error");
@@ -644,7 +864,7 @@ mod tests {
         let db = Db::open(&path).unwrap();
         let row = RunRow { id: 0, kind: "single".into(), timestamp: "09:41:03".into(),
             model: "m".into(), max_tokens: 1, ttft_ms: None, total_s: 1.0, tokens: 1,
-            tok_per_s: 1.0, concurrency: None, base_url: None };
+            tok_per_s: 1.0, concurrency: None, base_url: None, provider: None };
         db.insert_run(&row).await.unwrap();
         assert!(path.exists(), "the database file must exist under the new directory");
         let _ = std::fs::remove_dir_all(&root);
@@ -705,7 +925,7 @@ mod tests {
         let seed = |kind: &str| RunRow {
             id: 0, kind: kind.into(), timestamp: "2026-11-05 09:41:03".into(),
             model: "m".into(), max_tokens: 8, ttft_ms: None, total_s: 1.0, tokens: 8,
-            tok_per_s: 8.0, concurrency: None, base_url: None };
+            tok_per_s: 8.0, concurrency: None, base_url: None, provider: None };
         db.insert_run(&seed("single")).await.unwrap();
         db.insert_run(&seed("stress")).await.unwrap();
 

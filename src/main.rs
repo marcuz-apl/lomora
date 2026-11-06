@@ -32,20 +32,20 @@ fn main() -> ExitCode {
         };
     }
 
-    // Windows: hide the console when it belongs to this process alone. Doing it before the
-    // hardware sampler starts is what keeps the flash to the window-creation time. `hidden` also
-    // decides whether the server gets a tray icon - the same launch has no other way back.
+    // Windows: close the console when it belongs to this process alone, so the app has no taskbar
+    // window and lives only in the tray. Doing it before the hardware sampler starts is what keeps
+    // the flash to the window-creation time. `hidden` also decides whether the server gets a tray
+    // icon - the same launch has no other way back.
     let hidden = lomora::console::apply_console(launch.console);
     if launch.daemonized { lomora::console::write_pid_file(&cfg.db_path); }
 
     match run(cfg, hidden) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            // A failure nobody can see is worse than the window this whole branch exists to hide.
-            // When the window was hidden, hold it open: it would otherwise close with the process.
-            let revealed = lomora::console::reveal_console();
-            eprintln!("Error: {e:?}");
-            lomora::console::wait_for_enter(revealed);
+            // A failure nobody can see is worse than the window this stream exists to hide. With
+            // the console closed there is nothing left to print to, so `report_failure` puts the
+            // error in a message box; every other launch still gets the stderr line.
+            lomora::console::report_failure(&format!("{e:?}"));
             ExitCode::FAILURE
         }
     }
@@ -81,15 +81,19 @@ async fn serve(cfg: Config, hidden: bool) -> anyhow::Result<()> {
     // request.
     let sys = lomora::hw::read_profile_static();
     let state = lomora::app::AppState::new(cfg, hw, http, db, sys, gpu);
+    // The tray's Settings item writes the same gate the request handlers read.
+    let sql = state.sql.clone();
     let router = lomora::app::build_router(state);
     let addr = format!("0.0.0.0:{port}");
     // Bound first: a tray icon pointing at a port nobody serves would be worse than no icon.
     let listener = TcpListener::bind(&addr).await?;
-    println!("Lomora listening on http://{addr}");
-    // The tray exists only where the console was hidden. Its Quit stops the server through the
+    // After the console is closed there is no stdout to write to, and a `println!` against the
+    // stale handle would panic. The tray is the status surface for that launch.
+    if !hidden { println!("Lomora listening on http://{addr}"); }
+    // The tray exists only where the console was closed. Its Quit stops the server through the
     // channel, so `with_graceful_shutdown` lets in-flight requests (and SQLite writes) finish
     // instead of cutting the process off mid-write.
-    let quit = lomora::tray::start(hidden, port);
+    let quit = lomora::tray::start(hidden, port, sql);
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             match quit {

@@ -1,13 +1,16 @@
-//! The notification-area icon that keeps a hidden Lomora clickable.
+//! The notification-area icon that keeps a windowless Lomora clickable.
 //!
 //! Windows-only by nature: the Unix `--hidden` path is a daemon with a pid file, and a launch from
 //! a shell keeps its console, so neither needs a tray. A tray is started only when this process
-//! hid the console it owns (double-click, a shortcut, autostart), because that is the launch where
-//! the dashboard would otherwise be reachable only by remembering the address.
+//! closed the console it owns (double-click, a shortcut, autostart), because that is the launch
+//! where the dashboard would otherwise be reachable only by remembering the address.
 //!
-//! The icon carries two actions - open the dashboard in the default browser, or quit - and Quit
-//! stops the server through a channel rather than `process::exit`, so in-flight SQLite writes are
-//! allowed to finish. If the icon cannot be created at all, startup continues exactly as before.
+//! The menu opens the dashboard in the default browser, toggles the raw-SQL console for this
+//! session, shows the product facts, links to the release page, and quits. Quit stops the server
+//! through a channel rather than `process::exit`, so in-flight SQLite writes are allowed to
+//! finish. If the icon cannot be created at all, startup continues exactly as before.
+
+use crate::config::SqlGate;
 
 /// The text shown when the pointer rests on the icon. Must stay inside `NOTIFYICONDATAW::szTip`,
 /// which holds 128 UTF-16 units including the terminating NUL.
@@ -41,6 +44,36 @@ pub fn icon_bgra() -> Vec<u8> {
     px
 }
 
+/// The facts the About item shows, mirroring the dashboard's About dialog. The version is
+/// compiled from `Cargo.toml`, so it cannot drift from `/api/version`.
+pub fn about_text(version: &str, port: u16) -> String {
+    format!(
+        "Lomora {version}\n\
+         We gauge models\n\n\
+         A web dashboard for benchmarking and monitoring local LLM servers — LM Studio, \
+         Ollama, Moderado Gateway, or any OpenAI-compatible endpoint.\n\n\
+         Dashboard: http://localhost:{port}\n\
+         GitHub: https://github.com/marcuz-apl/lomora\n\
+         MIT License — © 2026 Lomorat, Alfazen Inc."
+    )
+}
+
+/// The confirmation shown before the tray opens the SQL console. It must be specific: Lomora
+/// listens on every interface, so opening the console exposes row-level SQL to the whole
+/// network, and the schema guard — which protects the tables' structure — does not protect
+/// their contents.
+pub fn sql_warning(port: u16) -> String {
+    format!(
+        "The SQL console runs row-level SQL against the Lomora database: SELECT, INSERT, UPDATE \
+         and DELETE all work, and a script is not undone.\n\n\
+         Dropping tables, indexes, views and triggers is refused, as are ALTER TABLE and other \
+         schema changes — but rows can still be rewritten or deleted without undo.\n\n\
+         Lomora listens on every network interface, so while the console is open, anyone who can \
+         reach this computer on port {port} can run the same SQL.\n\n\
+         Enable it for this session?"
+    )
+}
+
 /// Copy a string into a fixed-size UTF-16 field, truncating to leave room for the NUL. The
 /// notification data's `szTip` and `szInfo` are raw arrays, and their length is part of the ABI.
 pub fn copy_wide<const N: usize>(dst: &mut [u16; N], src: &str) {
@@ -54,15 +87,16 @@ pub fn copy_wide<const N: usize>(dst: &mut [u16; N], src: &str) {
     if written < N { dst[written] = 0; }
 }
 
-/// Starts the tray when this launch hid the console. The receiver resolves when the user picks
-/// Quit; `None` means there is no tray, and the caller must not wait for anything.
-pub fn start(hidden: bool, port: u16) -> Option<tokio::sync::oneshot::Receiver<()>> {
+/// Starts the tray when this launch closed the console. The receiver resolves when the user picks
+/// Quit; `None` means there is no tray, and the caller must not wait for anything. `sql` is the
+/// server's live gate, so the Settings item and the request handlers act on the same state.
+pub fn start(hidden: bool, port: u16, sql: SqlGate) -> Option<tokio::sync::oneshot::Receiver<()>> {
     if !hidden { return None; }
     #[cfg(windows)]
-    { win::start(port) }
+    { win::start(port, sql) }
     #[cfg(not(windows))]
     {
-        let _ = port;
+        let _ = (port, sql);
         None
     }
 }
@@ -72,6 +106,7 @@ mod win {
     use std::mem::size_of;
     use std::sync::{Mutex, OnceLock};
 
+    use crate::config::SqlGate;
     use windows::core::{BOOL, PCWSTR};
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
@@ -86,33 +121,41 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
         DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, HCURSOR,
-        HICON, ICONINFO, IDI_APPLICATION, LoadIconW, MF_SEPARATOR, MF_STRING, MSG,
-        PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOWNORMAL, SetForegroundWindow,
-        TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
-        WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_NULL,
-        WM_RBUTTONUP, WNDCLASSW, WNDCLASS_STYLES,
+        HICON, ICONINFO, IDI_APPLICATION, IDYES, LoadIconW, MB_DEFBUTTON2, MB_ICONINFORMATION,
+        MB_ICONWARNING, MB_OK, MB_YESNO, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
+        MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOWNORMAL,
+        SetForegroundWindow, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
+        WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WNDCLASSW, WNDCLASS_STYLES,
     };
 
     const ICON_ID: u32 = 1;
     const OPEN_ID: usize = 1;
     const QUIT_ID: usize = 2;
+    const SQL_ID: usize = 3;
+    const ABOUT_ID: usize = 4;
+    const UPDATES_ID: usize = 5;
     /// Mouse events arrive on this message; `lParam` carries the actual event.
     const TRAY_MESSAGE: u32 = WM_APP + 1;
+    const RELEASES_URL: &str = "https://github.com/marcuz-apl/lomora/releases";
 
     /// The URL is kept as UTF-16 because `ShellExecuteW` reads it after the thread that built the
-    /// string is long gone. Quit travels through a channel, never `process::exit`.
+    /// string is long gone. Quit travels through a channel, never `process::exit`. `sql` is the
+    /// server's gate, so the menu cannot report a state the routes do not enforce.
     struct Shared {
         url: Vec<u16>,
+        port: u16,
+        sql: SqlGate,
         quit: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     }
 
     /// One tray per process; `start` is called once, from `serve`.
     static SHARED: OnceLock<Shared> = OnceLock::new();
 
-    pub fn start(port: u16) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    pub fn start(port: u16, sql: SqlGate) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let url = format!("http://localhost:{port}");
-        if SHARED.set(Shared { url: wide(&url), quit: Mutex::new(Some(tx)) }).is_err() {
+        if SHARED.set(Shared { url: wide(&url), port, sql, quit: Mutex::new(Some(tx)) }).is_err() {
             return None;
         }
         // The message loop needs its own thread: it blocks in `GetMessageW` for the life of the
@@ -191,6 +234,9 @@ mod win {
                 WM_COMMAND => {
                     match wparam.0 & 0xFFFF {
                         OPEN_ID => open_dashboard(),
+                        SQL_ID => toggle_sql(hwnd),
+                        ABOUT_ID => show_about(hwnd),
+                        UPDATES_ID => open_releases(),
                         QUIT_ID => quit(hwnd),
                         _ => {}
                     }
@@ -224,9 +270,27 @@ mod win {
     fn show_menu(hwnd: HWND) {
         unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
+            let Ok(settings) = CreatePopupMenu() else {
+                let _ = DestroyMenu(menu);
+                return;
+            };
             let open = wide("Open dashboard");
+            let settings_label = wide("Settings");
+            let sql = wide("Allow SQL CRUD (this session)");
+            let about = wide("About");
+            let updates = wide("Check for updates…");
             let quit = wide("Quit");
+            // Built per click, so the checkmark is always the gate the routes are reading.
+            let checked = SHARED.get().is_some_and(|shared| shared.sql.enabled());
+            let sql_flags = if checked { MF_STRING | MF_CHECKED } else { MF_STRING };
+            let _ = AppendMenuW(settings, sql_flags, SQL_ID, PCWSTR(sql.as_ptr()));
             let _ = AppendMenuW(menu, MF_STRING, OPEN_ID, PCWSTR(open.as_ptr()));
+            // For `MF_POPUP`, the item id is the submenu's handle; `menu` owns it from here, and
+            // destroying the parent destroys the submenu with it.
+            let _ = AppendMenuW(menu, MF_POPUP, settings.0 as usize,
+                                PCWSTR(settings_label.as_ptr()));
+            let _ = AppendMenuW(menu, MF_STRING, ABOUT_ID, PCWSTR(about.as_ptr()));
+            let _ = AppendMenuW(menu, MF_STRING, UPDATES_ID, PCWSTR(updates.as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, QUIT_ID, PCWSTR(quit.as_ptr()));
             let mut point = POINT::default();
@@ -245,6 +309,53 @@ mod win {
                 let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
             }
             let _ = DestroyMenu(menu);
+        }
+    }
+
+    /// Opens or closes the console for this session. Opening asks first and defaults to No: the
+    /// gate guards row-level SQL on a listener that reaches the whole LAN. Closing needs no
+    /// ceremony — it can only reduce what is reachable.
+    fn toggle_sql(hwnd: HWND) {
+        let Some(shared) = SHARED.get() else { return };
+        if shared.sql.enabled() {
+            shared.sql.set(false);
+            return;
+        }
+        let text = wide(&super::sql_warning(shared.port));
+        let title = wide("Lomora — SQL console");
+        let answer = unsafe {
+            MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()),
+                        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2)
+        };
+        if answer.0 == IDYES.0 {
+            shared.sql.set(true);
+        }
+    }
+
+    fn show_about(hwnd: HWND) {
+        let Some(shared) = SHARED.get() else { return };
+        let text = wide(&super::about_text(env!("CARGO_PKG_VERSION"), shared.port));
+        let title = wide("About Lomora");
+        unsafe {
+            MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()),
+                        MB_OK | MB_ICONINFORMATION);
+        }
+    }
+
+    /// Until a signed updater exists, the honest action is to show the release page rather than
+    /// promise an in-app update.
+    fn open_releases() {
+        let operation = wide("open");
+        let url = wide(RELEASES_URL);
+        unsafe {
+            let _ = ShellExecuteW(
+                None,
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(url.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
         }
     }
 
@@ -341,7 +452,8 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{balloon, copy_wide, icon_bgra, start, tooltip};
+    use super::{about_text, balloon, copy_wide, icon_bgra, sql_warning, start, tooltip};
+    use crate::config::SqlGate;
 
     #[test]
     fn the_tooltip_names_the_dashboard_address() {
@@ -399,13 +511,37 @@ mod tests {
     }
 
     #[test]
-    fn there_is_no_tray_without_a_hidden_console() {
-        assert!(start(false, 8501).is_none());
+    fn the_about_box_carries_the_product_facts() {
+        let text = about_text("0.1.7", 8501);
+        assert!(text.contains("Lomora 0.1.7"), "{text}");
+        assert!(text.contains("We gauge models"), "{text}");
+        assert!(text.contains("http://localhost:8501"), "{text}");
+        assert!(text.contains("https://github.com/marcuz-apl/lomora"), "{text}");
+        assert!(text.contains("MIT License"), "{text}");
+    }
+
+    // The warning is the only thing standing between a mis-click and row-level SQL on a 0.0.0.0
+    // bind, so it must name the address, the risk, and the guard's limit — it refuses schema
+    // changes, not deletes — rather than ask a vague "are you sure?".
+    #[test]
+    fn the_sql_warning_names_the_port_the_risk_and_the_session_limit() {
+        let text = sql_warning(18513);
+        assert!(text.contains("port 18513"), "{text}");
+        assert!(text.contains("Dropping tables"), "must name what is refused: {text}");
+        assert!(text.contains("DELETE"), "must name row-level SQL as allowed: {text}");
+        assert!(text.contains("without undo"), "must not imply the guard protects rows: {text}");
+        assert!(text.contains("this session"), "{text}");
+        assert!(text.contains("network interface"), "{text}");
+    }
+
+    #[test]
+    fn there_is_no_tray_when_the_console_stays_open() {
+        assert!(start(false, 8501, SqlGate::new(true)).is_none());
     }
 
     #[cfg(not(windows))]
     #[test]
     fn there_is_no_tray_off_windows() {
-        assert!(start(true, 8501).is_none());
+        assert!(start(true, 8501, SqlGate::new(false)).is_none());
     }
 }

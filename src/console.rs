@@ -3,10 +3,16 @@
 //! finds itself in, so the decisions are testable on every platform; the Win32 and `libc` calls
 //! are thin wrappers around those decisions.
 //!
-//! The rule behind all of it: a console Lomora owns is Lomora's to hide, and a console it shares
-//! with a shell is not. Hiding a shared console would hide the user's own terminal, and detaching
-//! from it (`FreeConsole`) leaves the process writing to a handle that no longer exists - a later
-//! `println!` then panics. So a shared terminal is left exactly as it is.
+//! The rule behind all of it: a console Lomora owns is Lomora's to close, and a console it shares
+//! with a shell is not. Closing a shared console would take the user's own terminal with it, and
+//! detaching from it (`FreeConsole`) leaves the process writing to handles that no longer exist -
+//! a later `println!` then panics. So a shared terminal is left exactly as it is.
+//!
+//! Hiding the window is not enough on Windows 11: the default terminal can be Windows Terminal,
+//! which hosts the console in its own window. `ShowWindow(SW_HIDE)` hides the conhost client
+//! inside that host, while the host window - and its taskbar button - stays. Detaching is what
+//! ends the console session and closes the window for real. A console Lomora owns has no one else
+//! to lose, which is why the detach happens only in that case.
 
 use std::path::{Path, PathBuf};
 
@@ -15,8 +21,8 @@ use crate::cli::Console;
 /// The outcome of the Windows console policy for one launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WinPlan {
-    /// The console exists only for this process: hide it.
-    Hide,
+    /// The console exists only for this process: close it.
+    Close,
     /// Nothing to do - either `--console` was asked for, or there is no console of our own.
     Keep,
     /// A shell shares the window, so `--hidden` declines and says why.
@@ -29,9 +35,9 @@ pub fn windows_plan(mode: Console, attached: u32) -> WinPlan {
     match mode {
         Console::Visible => WinPlan::Keep,
         // Zero means there is no console handle at all (a service, or a detached parent), so
-        // there is nothing to hide.
+        // there is nothing to close.
         _ if attached == 0 => WinPlan::Keep,
-        _ if attached == 1 => WinPlan::Hide,
+        _ if attached == 1 => WinPlan::Close,
         // A shell owns that window. `--hidden` says so out loud; the default stays quiet because
         // nothing was asked for.
         Console::Hidden => WinPlan::KeepShared,
@@ -58,20 +64,20 @@ pub fn write_pid_file(db_path: &Path) {
         let _ = std::fs::create_dir_all(dir);
     }
     if std::fs::write(&path, format!("{}\n", std::process::id())).is_err() {
-        // A permission problem here is one the database will hit too. Nothing to hide, but
-        // nothing to stop the daemon for either.
+        // A permission problem here is one the database will hit too: worth a line, not a
+        // shutdown.
         eprintln!("Lomora: could not write {} (continuing anyway)", path.display());
     }
 }
 
 /// Windows: apply the console policy for this launch. Called before the server starts, so the
 /// window is already gone by the time the first hardware scan runs. The return value says whether
-/// this process hid its own console - exactly the launch where a tray icon is the only way back.
+/// this process closed its own console - exactly the launch where a tray icon is the only way back.
 pub fn apply_console(mode: Console) -> bool {
     #[cfg(windows)]
     {
         match windows_plan(mode, win::tenants()) {
-            WinPlan::Hide => { win::hide(); true }
+            WinPlan::Close => { win::close_console(); true }
             WinPlan::Keep => false,
             WinPlan::KeepShared => {
                 println!(
@@ -87,39 +93,28 @@ pub fn apply_console(mode: Console) -> bool {
     }
 }
 
-/// Put a hidden window back, so a startup failure is never invisible. Only does anything when this
-/// process actually hid the console; the return value says whether a window was revealed, which is
-/// exactly when the caller must keep it open long enough to be read.
-pub fn reveal_console() -> bool {
+/// Report a startup failure where the user can actually see it. When this launch closed its
+/// console there is nothing left to print to, so the error goes into a message box; every other
+/// launch still has its window and gets the usual stderr line.
+pub fn report_failure(message: &str) {
     #[cfg(windows)]
-    { win::reveal() }
-    #[cfg(not(windows))]
-    false
-}
-
-/// Hold a revealed console open until the user has seen the error. A window that `reveal_console`
-/// brought back would otherwise close with the process, leaving a flash and no message; a terminal
-/// that never hid anything keeps its output by itself, so nothing is waited for (and a service
-/// with no stdin never blocks).
-pub fn wait_for_enter(revealed: bool) {
-    #[cfg(windows)]
-    if revealed {
-        eprintln!("\nPress Enter to close this window.");
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
+    if win::console_closed() {
+        win::failure_box(message);
+        return;
     }
-    #[cfg(not(windows))]
-    let _ = revealed;
+    eprintln!("Error: {message}");
 }
 
 #[cfg(windows)]
 mod win {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_RESTORE};
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 
-    /// Whether this process hid the console, so `reveal` does not show one the user never saw.
-    static HID: AtomicBool = AtomicBool::new(false);
+    /// Whether this process closed its console. Output has no window to land in after that, so a
+    /// startup failure takes the message-box route instead.
+    static CLOSED: AtomicBool = AtomicBool::new(false);
 
     /// How many processes share our console. The buffer is small on purpose: a console with more
     /// than eight attached processes is already "shared", and the count is the only thing callers
@@ -129,31 +124,33 @@ mod win {
         unsafe { GetConsoleProcessList(&mut pids) }
     }
 
-    /// Hide our console window. `ShowWindow` returns the window's *previous* visibility, which
-    /// nothing here needs.
-    fn hide_window() {
-        let hwnd = unsafe { GetConsoleWindow() };
-        // Null when the process has no console at all (started as a service, or detached).
-        if hwnd.is_invalid() { return; }
-        let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+    /// End this process's console session. On Windows 11 that is also what closes the Windows
+    /// Terminal window hosting the console; `ShowWindow(SW_HIDE)` only hides the conhost client
+    /// inside it and leaves the host window - and its taskbar button - behind.
+    pub fn close_console() {
+        CLOSED.store(true, Ordering::SeqCst);
+        unsafe { let _ = FreeConsole(); }
     }
 
-    /// Bring a hidden window back. `SW_RESTORE` rather than `SW_SHOW`: a shortcut or launcher can
-    /// create the console already minimized, and `SW_SHOW` would leave it minimized.
-    fn show_window() {
-        let hwnd = unsafe { GetConsoleWindow() };
-        if hwnd.is_invalid() { return; }
-        let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+    pub fn console_closed() -> bool {
+        CLOSED.load(Ordering::SeqCst)
     }
 
-    pub fn hide() {
-        HID.store(true, Ordering::SeqCst);
-        hide_window();
+    /// The one error surface left when no console exists. `MessageBoxW` blocks until dismissed,
+    /// which is right for a startup failure: the process is about to exit, and a click is the
+    /// only way the user learns why.
+    pub fn failure_box(message: &str) {
+        let text = wide(message);
+        let title = wide("Lomora — startup failed");
+        unsafe {
+            MessageBoxW(None, PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()),
+                        MB_OK | MB_ICONERROR);
+        }
     }
 
-    /// Returns whether a hidden window was actually brought back.
-    pub fn reveal() -> bool {
-        if HID.swap(false, Ordering::SeqCst) { show_window(); true } else { false }
+    /// A NUL-terminated UTF-16 copy for the Win32 calls.
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 }
 
@@ -214,23 +211,23 @@ mod tests {
     use std::path::Path;
 
     // One attached process means the console was created for us (double-click, a shortcut, Task
-    // Scheduler); two or more means a shell is sharing it, and that window is not ours to hide.
+    // Scheduler); two or more means a shell is sharing it, and that window is not ours to close.
     #[test]
-    fn a_console_lomora_owns_is_hidden_and_a_shared_one_is_not() {
-        assert_eq!(windows_plan(Console::Auto, 1), WinPlan::Hide);
+    fn a_console_lomora_owns_is_closed_and_a_shared_one_is_not() {
+        assert_eq!(windows_plan(Console::Auto, 1), WinPlan::Close);
         assert_eq!(windows_plan(Console::Auto, 2), WinPlan::Keep,
-                   "hiding a shared console would hide the user's terminal");
+                   "closing a shared console would take the user's terminal with it");
         assert_eq!(windows_plan(Console::Hidden, 2), WinPlan::KeepShared,
                    "an explicit --hidden still refuses to steal the shell's window, and says why");
     }
 
     // `--console` is the escape hatch for anyone who wants the log line and the Ctrl+C.
     #[test]
-    fn the_visible_switch_never_hides_and_no_console_has_nothing_to_hide() {
+    fn the_visible_switch_never_closes_and_no_console_has_nothing_to_close() {
         assert_eq!(windows_plan(Console::Visible, 1), WinPlan::Keep);
-        assert_eq!(windows_plan(Console::Hidden, 1), WinPlan::Hide);
+        assert_eq!(windows_plan(Console::Hidden, 1), WinPlan::Close);
         assert_eq!(windows_plan(Console::Auto, 0), WinPlan::Keep,
-                   "no console at all (service, detached parent) has nothing to hide");
+                   "no console at all (service, detached parent) has nothing to close");
     }
 
     #[test]
@@ -243,12 +240,14 @@ mod tests {
         assert_eq!(pid_file(Path::new("lomora.db")), Path::new("lomora.pid"));
     }
 
-    // Nothing was hidden in a test process, so there is no window to bring back and nothing to
-    // wait for. The second call would hang the suite if the guard were missing.
+    // A failing launch must leave a trace. In a test process no console was closed, so the report
+    // is a stderr line; if that guard were inverted, the modal box would hang the suite.
     #[test]
-    fn revealing_without_having_hidden_anything_is_a_no_op() {
-        assert!(!super::reveal_console());
-        super::wait_for_enter(false);
+    fn a_failure_is_reported_without_waiting_on_a_message_box() {
+        #[cfg(windows)]
+        assert!(!super::win::console_closed(),
+                "only a launch that closed its own console may open a message box");
+        super::report_failure("expected on stderr: a failure is always reported");
     }
 
     // The daemon writes its pid before the server gets as far as `Db::open`, so on a first run

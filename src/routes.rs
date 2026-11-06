@@ -290,7 +290,7 @@ pub async fn stress_test(State(st): State<AppState>, body: Bytes) -> Response {
         model: format!("{} (stress x{})", req.model, req.concurrency),
         max_tokens: req.max_tokens, ttft_ms: None, total_s: out.wall_s,
         tokens: out.total_tokens, tok_per_s: out.agg_tok_per_s,
-        concurrency: Some(req.concurrency), base_url: Some(base),
+        concurrency: Some(req.concurrency), base_url: Some(base), provider: None,
     };
     if let Err(e) = st.db.insert_run(&row).await { return AppError::from(e).into_response(); }
     Json(out).into_response()
@@ -333,11 +333,12 @@ pub async fn fetch_prompts(State(st): State<AppState>) -> Result<Json<Value>, Ap
     Ok(Json(json!({ "added": added, "failed": failed })))
 }
 
-/// What the console answers when `LOMORA_SQL` is off. The wording names the switch because the
+/// What the console answers when the gate is closed. The wording names both switches because the
 /// dashboard can only report what the server said, and an operator who just saw a refusal needs
-/// the one fact that changes it.
+/// the one fact that changes it: the tray menu on a hidden Windows launch, or `LOMORA_SQL` before
+/// starting anywhere else.
 const SQL_DISABLED: &str =
-    "the SQL console is disabled; start Lomora with LOMORA_SQL=1 to enable it";
+    "the SQL console is disabled; enable it in the tray Settings menu, or start Lomora with LOMORA_SQL=1";
 
 /// `POST /api/sql`: run a whole SQL script on the dashboard's database.
 ///
@@ -352,7 +353,7 @@ const SQL_DISABLED: &str =
 /// and the script stops there; only a store-level failure (the progress handler refusing to
 /// install) rides `AppError`.
 pub async fn run_sql(State(st): State<AppState>, body: Bytes) -> Result<Response, AppError> {
-    if !st.cfg.sql_console {
+    if !st.sql.enabled() {
         return Ok(Json(json!({ "error": SQL_DISABLED })).into_response());
     }
     let req = match ValidationErrors::parse_json_body::<SqlReq>(&body, SqlReq::FIELDS) {
@@ -371,7 +372,7 @@ pub async fn run_sql(State(st): State<AppState>, body: Bytes) -> Result<Response
 /// disposition; a store failure is the usual 200 `{"error": …}` through `AppError`, which the
 /// browser will save as JSON rather than as a database — visible, and honest about what happened.
 pub async fn sql_backup(State(st): State<AppState>) -> Result<Response, AppError> {
-    if !st.cfg.sql_console {
+    if !st.sql.enabled() {
         return Ok(Json(json!({ "error": SQL_DISABLED })).into_response());
     }
     let bytes = st.db.backup_bytes().await?;
@@ -458,7 +459,8 @@ async fn probe(req: &TestReq, cfg: &Config, http: &reqwest::Client)
         id: 0,
         kind: "single".into(), timestamp: out.timestamp.clone(), model: out.model.clone(),
         max_tokens: out.max_tokens, ttft_ms: out.ttft_ms, total_s: out.total_s,
-        tokens: out.tokens, tok_per_s: out.tok_per_s, concurrency: None, base_url: Some(base) };
+        tokens: out.tokens, tok_per_s: out.tok_per_s, concurrency: None, base_url: Some(base),
+        provider: None };
     let value = serde_json::to_value(&out)
         .map_err(|e| AppError(format!("failed to serialize the test result: {e}")))?;
     Ok((value, row))

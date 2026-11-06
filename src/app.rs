@@ -6,12 +6,14 @@ use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
-use crate::config::Config;
+use crate::config::{Config, SqlGate};
 use crate::store::Db;
 
 #[derive(Clone)]
 pub struct AppState { pub cfg: Arc<Config>, pub hw: crate::hw::Sampler, pub http: reqwest::Client,
-                      pub db: Db, pub sys: crate::hw::ProfileStatic, pub gpu: crate::hw::GpuHandle }
+                      pub db: Db, pub sys: crate::hw::ProfileStatic, pub gpu: crate::hw::GpuHandle,
+                      /// Live state of the raw-SQL console; the tray's Settings menu writes it.
+                      pub sql: SqlGate }
 
 impl AppState {
     /// The single construction path. Every field is wired here and nowhere else, because
@@ -21,7 +23,10 @@ impl AppState {
     /// hardware snapshot and the profile endpoint.
     pub fn new(cfg: Config, hw: crate::hw::Sampler, http: reqwest::Client,
                db: Db, sys: crate::hw::ProfileStatic, gpu: crate::hw::GpuHandle) -> AppState {
-        AppState { cfg: Arc::new(cfg), hw, http, db, sys, gpu }
+        // The environment decides where the console starts; this cell is what the routes and
+        // the tray share from then on.
+        let sql = SqlGate::new(cfg.sql_console);
+        AppState { cfg: Arc::new(cfg), hw, http, db, sys, gpu, sql }
     }
 }
 
@@ -46,9 +51,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/stress", post(crate::routes::stress_test))
         .route("/api/prompts", get(crate::routes::get_prompts))
         .route("/api/prompts/fetch", post(crate::routes::fetch_prompts))
-        // Both halves of the console are gated on `LOMORA_SQL` inside the handlers, not here: the
-        // routes exist in every build, so a disabled console answers its documented refusal
-        // instead of a 404 the dashboard would have to guess about.
+        // Both halves of the console check the live `AppState::sql` gate inside the handlers, not
+        // here: the routes exist in every build, so a closed console answers its documented
+        // refusal instead of a 404 the dashboard would have to guess about.
         .route("/api/sql", post(crate::routes::run_sql))
         .route("/api/sql/backup", get(crate::routes::sql_backup))
         .fallback(fallback)

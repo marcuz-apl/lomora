@@ -24,6 +24,7 @@ fn row(model: &str) -> RunRow {
         tok_per_s: 8.0,
         concurrency: None,
         base_url: None,
+        provider: None,
     }
 }
 
