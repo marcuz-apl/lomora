@@ -1,13 +1,13 @@
-//! What happens to the terminal before the server starts, and the Unix detach that follows from
-//! `--hidden`. The policy is a pure function of the requested mode and the environment the process
-//! finds itself in, so the decisions are testable on every platform; the Win32 and `libc` calls
-//! are thin wrappers around those decisions.
+//! What happens to the terminal before the server starts, and the detach that follows from a
+//! shell launch (`--hidden` on Unix, the default on Windows). The policy is a pure function of the
+//! requested mode and the environment the process finds itself in, so the decisions are testable
+//! on every platform; the Win32 and `libc` calls are thin wrappers around those decisions.
 //!
 //! The rule behind all of it: a console Lomora owns is Lomora's to close, and a console it shares
 //! with a shell is not. Closing a shared console would take the user's own terminal with it, and
-//! detaching this process from it (`FreeConsole`) leaves it writing to handles that no longer exist
-//! - a later `println!` then panics. So a shell launch hands the work to a console-less child
-//! instead: the terminal keeps its window, and the server keeps running.
+//! detaching this process from it (`FreeConsole`) leaves it writing to handles that no longer
+//! exist, so a later `println!` panics. A shell launch therefore hands the work to a console-less
+//! child instead: the terminal keeps its window, and the server keeps running.
 //!
 //! Hiding the window is not enough on Windows 11: the default terminal can be Windows Terminal,
 //! which hosts the console in its own window. `ShowWindow(SW_HIDE)` hides the conhost client
@@ -30,7 +30,9 @@ pub enum WinPlan {
     Detach,
 }
 
-/// Whether `--console` was asked for; the only Windows launch that stays in the foreground.
+/// Whether this launch must hand over to a console-less child: true exactly when a shell owns the
+/// console and `--console` did not ask to stay attached. Split from `detach_needed` so the policy
+/// stays testable without a real console.
 pub fn windows_should_detach(mode: Console, attached: u32) -> bool {
     matches!(windows_plan(mode, attached), WinPlan::Detach)
 }
@@ -176,7 +178,7 @@ fn await_listening(child: &mut std::process::Child, port: u16)
         if let Some(status) = child.try_wait()? {
             let why = status.code().map(|c| c.to_string())
                 .unwrap_or_else(|| "killed by a signal".to_string());
-            eprintln!("Lomora failed to start (exit {why}). Run the same command without --hidden \
+            eprintln!("Lomora failed to start (exit {why}). Run the same command with --console \
                        to see the error.");
             return Ok(ExitCode::FAILURE);
         }
@@ -301,7 +303,8 @@ mod tests {
     }
 
     #[test]
-    fn the_pid_file_lives_beside_the_database() {        assert_eq!(pid_file(Path::new("data/lomora.db")), Path::new("data/lomora.pid"));
+    fn the_pid_file_lives_beside_the_database() {
+        assert_eq!(pid_file(Path::new("data/lomora.db")), Path::new("data/lomora.pid"));
         assert_eq!(pid_file(Path::new("/home/me/.lomora/data/lomora.db")),
                    Path::new("/home/me/.lomora/data/lomora.pid"));
         // A bare filename has no parent directory; the pid file then sits in the working

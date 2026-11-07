@@ -6,8 +6,8 @@ use lomora::cli::Console;
 use lomora::config::Config;
 use tokio::net::TcpListener;
 
-/// Everything that must happen before a thread exists - options, the console decision, the Unix
-/// detach - runs in this sync part. Only `run` hands over to the tokio runtime.
+/// Everything that must happen before a thread exists runs in this sync part: options, the console
+/// decision and the detach. Only `run` hands over to the tokio runtime.
 fn main() -> ExitCode {
     // Parsed first, and refused hard: an unknown option must never quietly start a server.
     let launch = match lomora::cli::from_env() {

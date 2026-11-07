@@ -20,7 +20,7 @@
 //   LOMORA_CACHE_DIR=DIR            Where to put the binary if ../bin is read-only.
 //   LOMORA_SKIP_DOWNLOAD=1          Leave the download to another mechanism.
 //   LOMORA_SKIP_VERIFY=1            Skip the SHA-256 check.
-//   LOMORA_VERSION=0.1.11            Override the release tag (defaults to package version).
+//   LOMORA_VERSION=0.1.11           Override the release tag (defaults to package version).
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -127,6 +127,20 @@ function expectedHash(sums, asset) {
   return null;
 }
 
+// Prove the file can actually execute - a glibc floor newer than this distribution, a missing
+// loader, a truncated download - and report the loader's own words when it cannot. Without this
+// the failure surfaces later as a bare spawn error with nothing to act on.
+function assertRunnable(binary) {
+  const probe = spawnSync(binary, ['--help'], { encoding: 'utf8', timeout: 15000 });
+  if (!probe.error && probe.status === 0) return;
+
+  fs.rmSync(binary, { force: true });
+  const detail = (probe.error && probe.error.message) ||
+    (probe.stderr || probe.stdout || '').trim().split(/\r?\n/)[0] ||
+    `exit ${probe.status}`;
+  throw new Error(`the installed binary does not run on this machine: ${detail}`);
+}
+
 // Resolves to the installed binary path, or null when the download was skipped.
 async function ensureBinary() {
   if (process.env.LOMORA_SKIP_DOWNLOAD === '1') {
@@ -150,6 +164,7 @@ async function ensureBinary() {
     const local = path.resolve(process.env.LOMORA_BINARY);
     fs.copyFileSync(local, dest);
     if (process.platform !== 'win32') fs.chmodSync(dest, 0o755);
+    assertRunnable(dest);
     console.log(`lomora: installed local binary ${local} -> ${dest}`);
     return dest;
   }
@@ -183,18 +198,7 @@ async function ensureBinary() {
     fs.rmSync(dest, { force: true });
     fs.renameSync(tmp, dest);
     if (process.platform !== 'win32') fs.chmodSync(dest, 0o755);
-
-    // A binary that cannot execute - a glibc floor newer than this distribution, a missing
-    // loader - would otherwise fail later as a bare spawn error. Prove it runs now, and report
-    // the loader's own words when it does not.
-    const probe = spawnSync(dest, ['--help'], { encoding: 'utf8' });
-    if (probe.error || probe.status !== 0) {
-      fs.rmSync(dest, { force: true });
-      const detail = (probe.error && probe.error.message) ||
-        (probe.stderr || probe.stdout || '').trim().split(/\r?\n/)[0] ||
-        `exit ${probe.status}`;
-      throw new Error(`the downloaded binary does not run on this machine: ${detail}`);
-    }
+    assertRunnable(dest);
 
     console.log(`lomora: installed ${dest}`);
     return dest;
