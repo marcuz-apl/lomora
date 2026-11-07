@@ -3,7 +3,7 @@
 #   irm https://raw.githubusercontent.com/marcuz-apl/lomora/master/install.ps1 | iex
 #
 # `irm | iex` cannot pass arguments, so use environment variables first:
-#   $env:LOMORA_VERSION = 'v0.1.9'      # pin a release; default: latest
+#   $env:LOMORA_VERSION = 'v0.1.10'      # pin a release; default: latest
 #   $env:LOMORA_INSTALL_DIR = 'C:\Tools' # default: %LOCALAPPDATA%\lomora\bin
 #   $env:LOMORA_SKIP_VERIFY = '1'       # skip the SHA-256 check
 #   $env:LOMORA_RELEASE_BASE = 'https://mirror/...' # fetch from a mirror
