@@ -32,7 +32,7 @@ npm install -g lomora
 lomora
 ```
 
-The [npm package](https://www.npmjs.com/package/lomora) is a ~5 kB launcher with no runtime dependencies: its postinstall downloads the matching release binary, checks its SHA-256, and places it beside the `lomora` command. Node is needed only to install and launch it — the server that runs is the same standalone Rust binary. For offline or proxied machines, download the asset by hand and run `LOMORA_BINARY=/path/to/lomora npm rebuild lomora`; see [npm/README.md](./npm/README.md) for the other install-time variables.
+The [npm package](https://www.npmjs.com/package/lomora) is a ~6 kB launcher with no runtime dependencies: the first time you run `lomora` it downloads the matching release binary, checks its SHA-256, and places it beside the command. Node is needed only to install and launch it — the server that runs is the same standalone Rust binary. There is deliberately no `postinstall` hook, because npm 12 blocks lifecycle scripts by default; the launcher fetches the binary itself, so `npm install -g lomora` needs no `allowScripts` approval. For offline or proxied machines, download the asset by hand and run `LOMORA_BINARY=/path/to/lomora lomora`; see [npm/README.md](./npm/README.md) for the other first-run variables.
 
 ### Manual download
 

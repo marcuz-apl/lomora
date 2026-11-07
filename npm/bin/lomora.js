@@ -1,22 +1,35 @@
 #!/usr/bin/env node
 'use strict';
 
-// Thin shim: npm installs this file as the `lomora` command, and the real work
-// belongs to the Rust binary that scripts/install.js placed next to it.
+// Thin launcher: npm installs this file as the `lomora` command, and the real
+// work belongs to the Rust binary.
+//
+// The binary is fetched on first use rather than from a postinstall hook,
+// because npm 12 blocks lifecycle scripts by default. That keeps
+// `npm install -g lomora` working with no allowScripts approval.
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
+const { targetPath } = require('../scripts/install.js');
 
 const exe = process.platform === 'win32' ? 'lomora.exe' : 'lomora';
-const binary = path.join(__dirname, exe);
+let binary = targetPath();
 
 if (!fs.existsSync(binary)) {
-  console.error(`lomora: the ${exe} binary is missing from ${__dirname}.`);
-  console.error('Reinstall it with:  npm rebuild lomora');
-  console.error('Or install without npm:  curl -fsSL https://raw.githubusercontent.com/marcuz-apl/lomora/master/install.sh | sh');
-  process.exit(1);
+  console.error('lomora: first run, fetching the release binary (this happens once)...');
+  const installer = path.join(__dirname, '..', 'scripts', 'install.js');
+  const result = spawnSync(process.execPath, [installer], { stdio: 'inherit' });
+  binary = targetPath();
+
+  if (result.status !== 0 || !fs.existsSync(binary)) {
+    console.error(`lomora: could not obtain the ${exe} binary.`);
+    console.error('lomora: check your network, or download it by hand from');
+    console.error('lomora:   https://github.com/marcuz-apl/lomora/releases/latest');
+    console.error('lomora: and point LOMORA_BINARY at the file, then run lomora again.');
+    process.exit(1);
+  }
 }
 
 const child = spawn(binary, process.argv.slice(2), { stdio: 'inherit' });
