@@ -14,7 +14,10 @@ target/
 # Unix daemon's pid file. Created on first run beside the working directory.
 data/
 
-# The npm postinstall downloads the release binary here; never commit it (it is
+# Editor settings are per-machine, not source; keep the directory out of the repository.
+.vscode/
+
+# The npm launcher downloads the release binary here on first run; never commit it (it is
 # platform-specific and ~9 MiB). `files` in npm/package.json excludes it from publishes.
 npm/bin/lomora
 npm/bin/lomora.exe
