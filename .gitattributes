@@ -1,0 +1,8 @@
+# Shell scripts and the npm launcher need a real LF shebang. This repo is edited
+# on Windows with core.autocrlf=true, so without these rules a fresh checkout
+# would turn `#!/bin/sh` into `#!/bin/sh\r`: `curl | sh` would fail on Linux/macOS,
+# and an npm package published from Windows would carry a broken Unix bin shim.
+*.sh               text eol=lf
+npm/bin/*.js       text eol=lf
+npm/scripts/*.js   text eol=lf
+npm/package.json   text eol=lf

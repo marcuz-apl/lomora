@@ -1,5 +1,8 @@
 .env
 
+# WorkBuddy session notes; not part of the shipped source.
+.workbuddy-ai/
+
 .worktrees/
 
 .superpowers/
@@ -10,3 +13,9 @@ target/
 # Runtime state, never source: the SQLite database, its ad-hoc backups, journals and the
 # Unix daemon's pid file. Created on first run beside the working directory.
 data/
+
+# The npm postinstall downloads the release binary here; never commit it (it is
+# platform-specific and ~9 MiB). `files` in npm/package.json excludes it from publishes.
+npm/bin/lomora
+npm/bin/lomora.exe
+npm/bin/.*.download

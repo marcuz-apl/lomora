@@ -89,6 +89,16 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The installers and the npm postinstall verify downloads against this file.
+      # Generate it here, from the exact artifacts being published, not from the
+      # per-platform build jobs, so the sums can never drift from the assets.
+      - name: Generate SHA256SUMS
+        shell: bash
+        working-directory: dist
+        run: |
+          sha256sum lomora-* > SHA256SUMS
+          cat SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
@@ -100,7 +110,52 @@ jobs:
             | Windows x86_64 | `lomora-windows-x86_64.exe` |
             | Linux x86_64 | `lomora-linux-x86_64` |
             | macOS (Apple Silicon) | `lomora-macos-aarch64` |
+            | Checksums | `SHA256SUMS` |
+
+            Install from a terminal:
+
+            ```bash
+            # Linux / macOS
+            curl -fsSL https://raw.githubusercontent.com/marcuz-apl/lomora/master/install.sh | sh
+            # Windows (PowerShell)
+            irm https://raw.githubusercontent.com/marcuz-apl/lomora/master/install.ps1 | iex
+            # Or with Node.js
+            npm install -g lomora
+            ```
 
             - Run the binary from a folder of its own: the database is created at `data/lomora.db` beside the working directory. `PORT` and `LOMORA_DB` override the defaults.
             - The binaries are unsigned. On Windows, SmartScreen shows "unknown publisher" once; choose *More info* then *Run anyway*. On macOS, right-click the binary and choose *Open* the first time, or run `chmod +x` and start it from a terminal.
             - GPU metrics need an NVIDIA driver exposing NVML (`nvml.dll` on Windows, `libnvidia-ml.so` on Linux). Machines without one, including Apple Silicon Macs, report CPU and RAM only, and the dashboard explains why and links the Windows/Linux driver download when a card is present.
+
+  publish-npm:
+    name: Publish to npm
+    # Publishing is optional for the release: without a configured NPM_TOKEN the
+    # job is a no-op and the GitHub release still ships all three binaries.
+    needs: publish
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: env.NPM_TOKEN != ''
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      # The tag is the source of truth for the version (the build job already
+      # checks it against Cargo.toml), so npm can never advertise a different
+      # release than the binary its postinstall downloads.
+      - name: Sync the package version with the tag
+        if: env.NPM_TOKEN != ''
+        working-directory: npm
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+
+      - name: Publish the launcher package
+        if: env.NPM_TOKEN != ''
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm pack --dry-run
+          npm publish --access public

@@ -1,0 +1,38 @@
+{
+  "name": "lomora",
+  "version": "0.1.7",
+  "description": "Local LLM rating toolbox: benchmark dashboard, HTTP API and SQLite history in one self-contained Rust binary",
+  "license": "MIT",
+  "homepage": "https://github.com/marcuz-apl/lomora#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marcuz-apl/lomora.git",
+    "directory": "npm"
+  },
+  "bugs": {
+    "url": "https://github.com/marcuz-apl/lomora/issues"
+  },
+  "keywords": [
+    "llm",
+    "benchmark",
+    "ollama",
+    "lm-studio",
+    "llama.cpp",
+    "dashboard"
+  ],
+  "bin": {
+    "lomora": "bin/lomora.js"
+  },
+  "files": [
+    "bin/lomora.js",
+    "scripts/install.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

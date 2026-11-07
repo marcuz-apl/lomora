@@ -2,9 +2,41 @@
 
 A web dashboard for benchmarking and monitoring local LLM servers — LM Studio, Ollama, Moderado Gateway, or any OpenAI-compatible endpoint. Run single benchmarks, fan out stress tests, and browse a dated run history that survives restarts. The dashboard, the API, and the SQLite store ship in a single Rust binary; no interpreter or runtime is required.
 
-## Download
+## Install
 
-Grab the binary for your platform from [Releases](https://github.com/marcuz-apl/lomora/releases/latest) and run it — no toolchain needed, the dashboard is embedded in the executable.
+### One line: curl (Linux, macOS) / irm (Windows)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/marcuz-apl/lomora/master/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/marcuz-apl/lomora/master/install.ps1 | iex
+```
+
+Each installer detects the platform, downloads the matching binary from the [latest release](https://github.com/marcuz-apl/lomora/releases/latest), verifies it against the release's `SHA256SUMS` when one is published, and installs it without sudo into `~/.local/bin` (Unix) or `%LOCALAPPDATA%\lomora\bin` (Windows), adding that folder to the user PATH when needed. Releases published before the checksum job still install over HTTPS with a warning instead of failing.
+
+Because a piped script cannot take arguments, use environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `LOMORA_VERSION=v0.1.7` | Pin a release instead of using the latest tag. |
+| `LOMORA_INSTALL_DIR=DIR` | Choose the install directory. |
+| `LOMORA_RELEASE_BASE=URL` | Fetch the assets and `SHA256SUMS` from a mirror. |
+| `LOMORA_SKIP_VERIFY=1` | Skip checksum verification. |
+
+### npm
+
+```bash
+npm install -g lomora
+lomora
+```
+
+The [npm package](https://www.npmjs.com/package/lomora) is a ~5 kB launcher with no runtime dependencies: its postinstall downloads the matching release binary, checks its SHA-256, and places it beside the `lomora` command. Node is needed only to install and launch it — the server that runs is the same standalone Rust binary. For offline or proxied machines, download the asset by hand and run `LOMORA_BINARY=/path/to/lomora npm rebuild lomora`; see [npm/README.md](./npm/README.md) for the other install-time variables.
+
+### Manual download
+
+Grab the binary for your platform from [Releases](https://github.com/marcuz-apl/lomora/releases/latest) and run it — no toolchain needed, the dashboard is embedded in the executable. `SHA256SUMS` in the same release lists the checksums.
 
 | Platform | Asset | First-run note |
 |---|---|---|
@@ -12,7 +44,17 @@ Grab the binary for your platform from [Releases](https://github.com/marcuz-apl/
 | Linux x86_64 | `lomora-linux-x86_64` | `chmod +x lomora-linux-x86_64` before running. |
 | macOS (Apple Silicon) | `lomora-macos-aarch64` | `chmod +x`, then right-click → *Open* the first time. |
 
+Only those three platforms have prebuilt binaries; Intel Macs, Linux ARM64 and Windows ARM64 need [a source build](#build-from-source).
+
 Run it from a folder of its own — the database is created at `data/lomora.db` beside the working directory, and `PORT` / `LOMORA_DB` override the defaults — then open http://localhost:8501. GPU metrics need an NVIDIA driver exposing NVML (`nvml.dll` on Windows, `libnvidia-ml.so` on Linux); machines without one, including Apple Silicon Macs, report CPU and RAM only, and the dashboard explains why and links the driver download when a card is present.
+
+### About code signing
+
+The installers sidestep the *warning*, not the *signature*. SmartScreen's app-reputation prompt is triggered for files carrying a Mark-of-the-Web (`Zone.Identifier`): browsers add it, while `curl`, `Invoke-WebRequest` and Node's HTTP client do not, and the binary is started from a terminal rather than through Explorer. So a curl/npm install normally runs without the "Windows protected your PC" dialog; npm adds one more layer in that the command npm launches is `node.exe`, which then spawns `lomora.exe`. On macOS the equivalent is `com.apple.quarantine`: browser downloads get it (hence the right-click → *Open* note above), curl/npm downloads usually do not.
+
+The executable itself is still unsigned (`Get-AuthenticodeSignature` reports `NotSigned`) and has no publisher identity. `SHA256SUMS` proves the download matches the release, not who produced it. Defender's cloud reputation / block-at-first-sight, attack-surface-reduction rules, AppLocker, WDAC, Windows S mode and corporate device policies can still block an unsigned binary, and a copy downloaded with a browser *will* show the SmartScreen warning.
+
+Code signing is deliberately out of scope for now. Lomora is a small, newly released tool, and its trust model is the GitHub Releases page over HTTPS plus `SHA256SUMS`, which both installers check. That gives download integrity and keeps the terminal install path free of prompts, at the cost of the browser-download warning and managed-device policies noted above. Signing can be added to the release workflow later without changing any of the installers.
 
 ## Build from source
 
