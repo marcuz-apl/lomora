@@ -20,7 +20,7 @@
 //   LOMORA_CACHE_DIR=DIR            Where to put the binary if ../bin is read-only.
 //   LOMORA_SKIP_DOWNLOAD=1          Leave the download to another mechanism.
 //   LOMORA_SKIP_VERIFY=1            Skip the SHA-256 check.
-//   LOMORA_VERSION=0.1.8            Override the release tag (defaults to package version).
+//   LOMORA_VERSION=0.1.9            Override the release tag (defaults to package version).
 
 const fs = require('node:fs');
 const os = require('node:os');
