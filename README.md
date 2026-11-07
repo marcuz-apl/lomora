@@ -20,7 +20,7 @@ Because a piped script cannot take arguments, use environment variables:
 
 | Variable | Purpose |
 |---|---|
-| `LOMORA_VERSION=v0.1.10` | Pin a release instead of using the latest tag. |
+| `LOMORA_VERSION=v0.1.11` | Pin a release instead of using the latest tag. |
 | `LOMORA_INSTALL_DIR=DIR` | Choose the install directory. |
 | `LOMORA_RELEASE_BASE=URL` | Fetch the assets and `SHA256SUMS` from a mirror. |
 | `LOMORA_SKIP_VERIFY=1` | Skip checksum verification. |

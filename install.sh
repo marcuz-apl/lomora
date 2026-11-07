@@ -4,9 +4,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/marcuz-apl/lomora/master/install.sh | sh
 #
 # Because `curl | sh` cannot pass arguments, everything is configured through the
-# environment (set them inline, e.g. `LOMORA_VERSION=v0.1.10 curl ... | sh`):
+# environment (set them inline, e.g. `LOMORA_VERSION=v0.1.11 curl ... | sh`):
 #
-#   LOMORA_VERSION=v0.1.10     Pin a release tag. Default: the latest release.
+#   LOMORA_VERSION=v0.1.11     Pin a release tag. Default: the latest release.
 #   LOMORA_INSTALL_DIR=DIR    Install location. Default: $HOME/.local/bin.
 #   LOMORA_SKIP_VERIFY=1      Skip the SHA-256 check (not recommended).
 #   LOMORA_RELEASE_BASE=URL   Fetch assets from a mirror of the release instead.
@@ -59,7 +59,7 @@ else
             | head -n 1)" || tag=''
     fi
 fi
-[ -n "$tag" ] || fail 'could not determine a release tag; set LOMORA_VERSION=v0.1.10 and retry'
+[ -n "$tag" ] || fail 'could not determine a release tag; set LOMORA_VERSION=v0.1.11 and retry'
 
 base="${LOMORA_RELEASE_BASE:-https://github.com/$REPO/releases/download/$tag}"
 base="${base%/}"

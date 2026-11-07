@@ -22,7 +22,11 @@ jobs:
           - os: windows-latest
             asset: lomora-windows-x86_64.exe
             binary: target/release/lomora.exe
-          - os: ubuntu-latest
+          # Pinned, not `ubuntu-latest`: the runner's glibc becomes the binary's floor. Built on
+          # 24.04 the asset required GLIBC_2.38/2.39 and died in the loader on Ubuntu 22.04,
+          # Debian 12 and RHEL 9. 22.04 keeps the floor at 2.35, and the binary only needs libc,
+          # libm and libgcc_s (NVML is dlopen'd at runtime), so nothing else is dragged along.
+          - os: ubuntu-22.04
             asset: lomora-linux-x86_64
             binary: target/release/lomora
           - os: macos-latest

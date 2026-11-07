@@ -20,7 +20,7 @@
 //   LOMORA_CACHE_DIR=DIR            Where to put the binary if ../bin is read-only.
 //   LOMORA_SKIP_DOWNLOAD=1          Leave the download to another mechanism.
 //   LOMORA_SKIP_VERIFY=1            Skip the SHA-256 check.
-//   LOMORA_VERSION=0.1.10            Override the release tag (defaults to package version).
+//   LOMORA_VERSION=0.1.11            Override the release tag (defaults to package version).
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -28,6 +28,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const http = require('node:http');
 const https = require('node:https');
+const { spawnSync } = require('node:child_process');
 
 const REPO = 'marcuz-apl/lomora';
 const binDir = path.join(__dirname, '..', 'bin');
@@ -182,6 +183,19 @@ async function ensureBinary() {
     fs.rmSync(dest, { force: true });
     fs.renameSync(tmp, dest);
     if (process.platform !== 'win32') fs.chmodSync(dest, 0o755);
+
+    // A binary that cannot execute - a glibc floor newer than this distribution, a missing
+    // loader - would otherwise fail later as a bare spawn error. Prove it runs now, and report
+    // the loader's own words when it does not.
+    const probe = spawnSync(dest, ['--help'], { encoding: 'utf8' });
+    if (probe.error || probe.status !== 0) {
+      fs.rmSync(dest, { force: true });
+      const detail = (probe.error && probe.error.message) ||
+        (probe.stderr || probe.stdout || '').trim().split(/\r?\n/)[0] ||
+        `exit ${probe.status}`;
+      throw new Error(`the downloaded binary does not run on this machine: ${detail}`);
+    }
+
     console.log(`lomora: installed ${dest}`);
     return dest;
   } finally {
