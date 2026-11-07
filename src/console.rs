@@ -29,6 +29,12 @@ pub enum WinPlan {
     KeepShared,
 }
 
+/// Whether `--hidden` has to hand over to a detached child: true exactly when a shell owns the
+/// console. Split from `detach_needed` so the policy stays testable without a real console.
+pub fn windows_should_detach(mode: Console, attached: u32) -> bool {
+    matches!(windows_plan(mode, attached), WinPlan::KeepShared)
+}
+
 /// `attached` is the number of processes sharing this console: one is Lomora alone (double-click,
 /// a shortcut, Task Scheduler), two or more means a shell is still sitting in that window.
 pub fn windows_plan(mode: Console, attached: u32) -> WinPlan {
@@ -154,28 +160,14 @@ mod win {
     }
 }
 
-/// Unix `--hidden`: re-exec this same binary detached, then report from the parent.
-///
-/// Re-exec rather than `fork`: `main` has not built the tokio runtime yet, but the process already
-/// owns a loaded SQLite and a runtime-less thread set, and a forked copy of a process that is about
-/// to build threads is how a daemon ends up deadlocked. A fresh `execve` in a new session has no
-/// such shared state. The child gets `LOMORA_DAEMON=1` so it cannot daemonize itself again, and
-/// null stdio so nothing it prints can outlive the parent that spawned it.
-#[cfg(unix)]
-pub fn daemonize(port: u16) -> anyhow::Result<std::process::ExitCode> {
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, ExitCode, Stdio};
-
-    let mut cmd = Command::new(std::env::current_exe()?);
-    cmd.args(std::env::args_os().skip(1))
-        .env("LOMORA_DAEMON", "1")
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    // `setsid` detaches the child from the terminal's session, so closing the shell or pressing
-    // Ctrl+C there cannot reach it. It is async-signal-safe, which is what `pre_exec` requires.
-    unsafe {
-        cmd.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
-    }
-    let mut child = cmd.spawn()?;
+/// Wait for a re-exec'd child to answer on `port`, then report. Shared by the Unix daemon and the
+/// Windows detach: both hand the real work to a child and need the same liveness-before-port
+/// ordering, so a child that died on a busy port is not mistaken for the server that owns it.
+#[cfg(any(unix, windows))]
+fn await_listening(child: &mut std::process::Child, port: u16)
+    -> anyhow::Result<std::process::ExitCode>
+{
+    use std::process::ExitCode;
 
     let addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -204,9 +196,71 @@ pub fn daemonize(port: u16) -> anyhow::Result<std::process::ExitCode> {
     }
 }
 
+/// Unix `--hidden`: re-exec this same binary detached, then report from the parent.
+///
+/// Re-exec rather than `fork`: `main` has not built the tokio runtime yet, but the process already
+/// owns a loaded SQLite and a runtime-less thread set, and a forked copy of a process that is about
+/// to build threads is how a daemon ends up deadlocked. A fresh `execve` in a new session has no
+/// such shared state. The child gets `LOMORA_DAEMON=1` so it cannot daemonize itself again, and
+/// null stdio so nothing it prints can outlive the parent that spawned it.
+#[cfg(unix)]
+pub fn daemonize(port: u16) -> anyhow::Result<std::process::ExitCode> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.args(std::env::args_os().skip(1))
+        .env("LOMORA_DAEMON", "1")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // `setsid` detaches the child from the terminal's session, so closing the shell or pressing
+    // Ctrl+C there cannot reach it. It is async-signal-safe, which is what `pre_exec` requires.
+    unsafe {
+        cmd.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+    }
+    let mut child = cmd.spawn()?;
+    await_listening(&mut child, port)
+}
+
+/// Whether this launch should hand over to a detached child instead of refusing to touch the
+/// shell's console. Only `--hidden` asks for it; a default launch keeps the foreground server, its
+/// log line and its Ctrl+C.
+#[cfg(windows)]
+pub fn detach_needed(mode: Console) -> bool {
+    windows_should_detach(mode, win::tenants())
+}
+
+/// Windows `--hidden`: re-exec this binary without a console, then report from the parent.
+///
+/// Refusing to close a shared console leaves the server pinned to the shell's window, and closing
+/// that window is the only way out - which takes the server with it. Handing the work to a
+/// console-less child gives the prompt back and leaves the tray icon as the way to the dashboard.
+#[cfg(windows)]
+pub fn detach(port: u16) -> anyhow::Result<std::process::ExitCode> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    // DETACHED_PROCESS: the child inherits no console, so the shell's window is not ours to lose
+    // and a Ctrl+C aimed at that window cannot reach the tray instance.
+    // CREATE_NEW_PROCESS_GROUP keeps it out of the shell's process group for the same reason.
+    // CREATE_UNICODE_ENVIRONMENT is not optional here: `creation_flags` replaces the defaults the
+    // standard library would set, and without it the UTF-16 environment block is read as ANSI -
+    // `LOMORA_DAEMON` never arrives and the child detaches itself again, forever.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
+
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.args(std::env::args_os().skip(1))
+        .env("LOMORA_DAEMON", "1")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT);
+    let mut child = cmd.spawn()?;
+    await_listening(&mut child, port)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{pid_file, windows_plan, WinPlan};
+    use super::{pid_file, windows_plan, windows_should_detach, WinPlan};
     use crate::cli::Console;
     use std::path::Path;
 
@@ -230,9 +284,24 @@ mod tests {
                    "no console at all (service, detached parent) has nothing to close");
     }
 
+    // `--hidden` from a shell hands over to a console-less child instead of pinning the server to
+    // a window whose only exit kills it. Every other launch keeps the old behaviour.
     #[test]
-    fn the_pid_file_lives_beside_the_database() {
-        assert_eq!(pid_file(Path::new("data/lomora.db")), Path::new("data/lomora.pid"));
+    fn only_hidden_from_a_shell_detaches() {
+        assert!(windows_should_detach(Console::Hidden, 2),
+                "a shell shares the console, so a detached child is the only way to the tray");
+        assert!(!windows_should_detach(Console::Hidden, 1),
+                "a console Lomora owns is simply closed, no child needed");
+        assert!(!windows_should_detach(Console::Auto, 2),
+                "a plain launch keeps the foreground server, its log line and its Ctrl+C");
+        assert!(!windows_should_detach(Console::Visible, 2),
+                "--console is the explicit request to stay attached");
+        assert!(!windows_should_detach(Console::Hidden, 0),
+                "no console at all has nothing to detach from");
+    }
+
+    #[test]
+    fn the_pid_file_lives_beside_the_database() {        assert_eq!(pid_file(Path::new("data/lomora.db")), Path::new("data/lomora.pid"));
         assert_eq!(pid_file(Path::new("/home/me/.lomora/data/lomora.db")),
                    Path::new("/home/me/.lomora/data/lomora.pid"));
         // A bare filename has no parent directory; the pid file then sits in the working

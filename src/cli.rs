@@ -33,8 +33,9 @@ Lomora - local LLM benchmark dashboard
 Usage: lomora [OPTIONS]
 
 Options:
-  --hidden    Windows: close the console Lomora owns, so it runs in the tray only (a
-              console shared with your shell is left alone).
+  --hidden    Windows: run in the tray only. A console Lomora owns is closed; from a
+              shell it detaches into a background process and gives the prompt back,
+              with the pid in lomora.pid beside the database.
               Linux and macOS: start detached in the background and exit once the
               dashboard answers; the pid goes to lomora.pid beside the database.
   --console   Never close the console window, even on double-click (Windows only).

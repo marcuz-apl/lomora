@@ -32,10 +32,25 @@ fn main() -> ExitCode {
         };
     }
 
+    // Windows `--hidden` from a shell takes the same route. The console belongs to the shell, so
+    // the choice is either to pin the server to a window whose only exit kills it, or to hand over
+    // to a console-less child that the tray icon can reach. This is the second one.
+    #[cfg(windows)]
+    if !launch.daemonized && lomora::console::detach_needed(launch.console) {
+        return match lomora::console::detach(cfg.port) {
+            Ok(code) => code,
+            Err(e) => { eprintln!("Error: {e:?}"); ExitCode::FAILURE }
+        };
+    }
+
     // Windows: close the console when it belongs to this process alone, so the app has no taskbar
     // window and lives only in the tray. Doing it before the hardware sampler starts is what keeps
     // the flash to the window-creation time. `hidden` also decides whether the server gets a tray
-    // icon - the same launch has no other way back.
+    // icon - the same launch has no other way back. A detached child has no console at all, so the
+    // tray is its only surface too; without this the server would run with no way to reach it.
+    #[cfg(windows)]
+    let hidden = lomora::console::apply_console(launch.console) || launch.daemonized;
+    #[cfg(not(windows))]
     let hidden = lomora::console::apply_console(launch.console);
     if launch.daemonized { lomora::console::write_pid_file(&cfg.db_path); }
 
