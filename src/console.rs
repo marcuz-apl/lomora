@@ -5,14 +5,15 @@
 //!
 //! The rule behind all of it: a console Lomora owns is Lomora's to close, and a console it shares
 //! with a shell is not. Closing a shared console would take the user's own terminal with it, and
-//! detaching from it (`FreeConsole`) leaves the process writing to handles that no longer exist -
-//! a later `println!` then panics. So a shared terminal is left exactly as it is.
+//! detaching this process from it (`FreeConsole`) leaves it writing to handles that no longer exist
+//! - a later `println!` then panics. So a shell launch hands the work to a console-less child
+//! instead: the terminal keeps its window, and the server keeps running.
 //!
 //! Hiding the window is not enough on Windows 11: the default terminal can be Windows Terminal,
 //! which hosts the console in its own window. `ShowWindow(SW_HIDE)` hides the conhost client
 //! inside that host, while the host window - and its taskbar button - stays. Detaching is what
 //! ends the console session and closes the window for real. A console Lomora owns has no one else
-//! to lose, which is why the detach happens only in that case.
+//! to lose, which is why the close happens only in that case.
 
 use std::path::{Path, PathBuf};
 
@@ -23,16 +24,15 @@ use crate::cli::Console;
 pub enum WinPlan {
     /// The console exists only for this process: close it.
     Close,
-    /// Nothing to do - either `--console` was asked for, or there is no console of our own.
+    /// Nothing to do - `--console` was asked for, or there is no console of our own.
     Keep,
-    /// A shell shares the window, so `--hidden` declines and says why.
-    KeepShared,
+    /// A shell shares the window: hand over to a console-less child rather than touch it.
+    Detach,
 }
 
-/// Whether `--hidden` has to hand over to a detached child: true exactly when a shell owns the
-/// console. Split from `detach_needed` so the policy stays testable without a real console.
+/// Whether `--console` was asked for; the only Windows launch that stays in the foreground.
 pub fn windows_should_detach(mode: Console, attached: u32) -> bool {
-    matches!(windows_plan(mode, attached), WinPlan::KeepShared)
+    matches!(windows_plan(mode, attached), WinPlan::Detach)
 }
 
 /// `attached` is the number of processes sharing this console: one is Lomora alone (double-click,
@@ -44,10 +44,10 @@ pub fn windows_plan(mode: Console, attached: u32) -> WinPlan {
         // there is nothing to close.
         _ if attached == 0 => WinPlan::Keep,
         _ if attached == 1 => WinPlan::Close,
-        // A shell owns that window. `--hidden` says so out loud; the default stays quiet because
-        // nothing was asked for.
-        Console::Hidden => WinPlan::KeepShared,
-        _ => WinPlan::Keep,
+        // A shell owns that window. Closing it would take the terminal with it, and staying
+        // attached pins the server to a window whose only exit kills it, so the launch hands over
+        // to a console-less child instead: prompt back, tray icon, pid file.
+        _ => WinPlan::Detach,
     }
 }
 
@@ -85,11 +85,9 @@ pub fn apply_console(mode: Console) -> bool {
         match windows_plan(mode, win::tenants()) {
             WinPlan::Close => { win::close_console(); true }
             WinPlan::Keep => false,
-            WinPlan::KeepShared => {
-                println!(
-                    "Lomora: this console belongs to your shell, so it stays open. Ctrl+C stops Lomora.");
-                false
-            }
+            // `main` hands over to a detached child before this point, so reaching here means the
+            // console count changed in between. Keeping the console is the safe answer.
+            WinPlan::Detach => false,
         }
     }
     #[cfg(not(windows))]
@@ -267,36 +265,38 @@ mod tests {
     // One attached process means the console was created for us (double-click, a shortcut, Task
     // Scheduler); two or more means a shell is sharing it, and that window is not ours to close.
     #[test]
-    fn a_console_lomora_owns_is_closed_and_a_shared_one_is_not() {
+    fn a_console_lomora_owns_is_closed_and_a_shared_one_is_handed_over() {
         assert_eq!(windows_plan(Console::Auto, 1), WinPlan::Close);
-        assert_eq!(windows_plan(Console::Auto, 2), WinPlan::Keep,
+        assert_eq!(windows_plan(Console::Auto, 2), WinPlan::Detach,
                    "closing a shared console would take the user's terminal with it");
-        assert_eq!(windows_plan(Console::Hidden, 2), WinPlan::KeepShared,
-                   "an explicit --hidden still refuses to steal the shell's window, and says why");
+        assert_eq!(windows_plan(Console::Hidden, 2), WinPlan::Detach,
+                   "--hidden asks for the same handover, explicitly");
     }
 
     // `--console` is the escape hatch for anyone who wants the log line and the Ctrl+C.
     #[test]
     fn the_visible_switch_never_closes_and_no_console_has_nothing_to_close() {
         assert_eq!(windows_plan(Console::Visible, 1), WinPlan::Keep);
+        assert_eq!(windows_plan(Console::Visible, 2), WinPlan::Keep);
         assert_eq!(windows_plan(Console::Hidden, 1), WinPlan::Close);
         assert_eq!(windows_plan(Console::Auto, 0), WinPlan::Keep,
                    "no console at all (service, detached parent) has nothing to close");
     }
 
-    // `--hidden` from a shell hands over to a console-less child instead of pinning the server to
-    // a window whose only exit kills it. Every other launch keeps the old behaviour.
+    // A shell launch hands over to a console-less child instead of pinning the server to a window
+    // whose only exit kills it. `--console` is the one launch that stays in the foreground, and a
+    // console Lomora owns needs no child at all.
     #[test]
-    fn only_hidden_from_a_shell_detaches() {
+    fn a_shell_launch_detaches_unless_console_was_asked_for() {
+        assert!(windows_should_detach(Console::Auto, 2),
+                "the default launch from a shell must not hold the terminal hostage");
         assert!(windows_should_detach(Console::Hidden, 2),
                 "a shell shares the console, so a detached child is the only way to the tray");
-        assert!(!windows_should_detach(Console::Hidden, 1),
-                "a console Lomora owns is simply closed, no child needed");
-        assert!(!windows_should_detach(Console::Auto, 2),
-                "a plain launch keeps the foreground server, its log line and its Ctrl+C");
         assert!(!windows_should_detach(Console::Visible, 2),
                 "--console is the explicit request to stay attached");
-        assert!(!windows_should_detach(Console::Hidden, 0),
+        assert!(!windows_should_detach(Console::Auto, 1),
+                "a console Lomora owns is simply closed, no child needed");
+        assert!(!windows_should_detach(Console::Auto, 0),
                 "no console at all has nothing to detach from");
     }
 

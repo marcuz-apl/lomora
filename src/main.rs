@@ -32,9 +32,10 @@ fn main() -> ExitCode {
         };
     }
 
-    // Windows `--hidden` from a shell takes the same route. The console belongs to the shell, so
-    // the choice is either to pin the server to a window whose only exit kills it, or to hand over
-    // to a console-less child that the tray icon can reach. This is the second one.
+    // Windows launches from a shell take the same route, `--console` being the one exception. The
+    // console belongs to the shell, so the choice is either to pin the server to a window whose
+    // only exit kills it, or to hand over to a console-less child that the tray icon can reach.
+    // This is the second one.
     #[cfg(windows)]
     if !launch.daemonized && lomora::console::detach_needed(launch.console) {
         return match lomora::console::detach(cfg.port) {
