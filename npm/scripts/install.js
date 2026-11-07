@@ -9,7 +9,7 @@
 //   LOMORA_RELEASE_BASE=URL         Use a mirror (or a local server for tests).
 //   LOMORA_SKIP_DOWNLOAD=1          Leave the download to another mechanism.
 //   LOMORA_SKIP_VERIFY=1            Skip the SHA-256 check.
-//   LOMORA_VERSION=0.1.7            Override the release tag (defaults to package version).
+//   LOMORA_VERSION=0.1.8            Override the release tag (defaults to package version).
 
 const fs = require('node:fs');
 const path = require('node:path');

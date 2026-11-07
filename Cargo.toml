@@ -1,6 +1,6 @@
 [package]
 name = "lomora"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 # Required since src/bin/mock_upstream.rs exists: without it `cargo run` refuses to guess
 # between the `lomora` and `mock_upstream` binaries, and plain `cargo run` should start the server.

@@ -1,6 +1,6 @@
 {
   "name": "lomora",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Local LLM rating toolbox: benchmark dashboard, HTTP API and SQLite history in one self-contained Rust binary",
   "license": "MIT",
   "homepage": "https://github.com/marcuz-apl/lomora#readme",

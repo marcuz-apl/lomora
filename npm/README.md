@@ -38,7 +38,7 @@ Intel Macs, Linux ARM64 and Windows ARM64 have no prebuilt binary yet; build fro
 | Variable | Purpose |
 |---|---|
 | `LOMORA_BINARY` | Path to an existing binary to copy instead of downloading (offline / air-gapped installs). |
-| `LOMORA_VERSION` | Release tag to fetch, e.g. `0.1.7`. Defaults to this package's version. |
+| `LOMORA_VERSION` | Release tag to fetch, e.g. `0.1.8`. Defaults to this package's version. |
 | `LOMORA_RELEASE_BASE` | Base URL of a mirror serving the release assets and, ideally, `SHA256SUMS`. |
 | `LOMORA_SKIP_DOWNLOAD=1` | Do not download anything (you provide the binary yourself). |
 | `LOMORA_SKIP_VERIFY=1` | Skip checksum verification. |
