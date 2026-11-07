@@ -112,9 +112,11 @@ jobs:
             | Platform | Asset |
             |---|---|
             | Windows x86_64 | `lomora-windows-x86_64.exe` |
-            | Linux x86_64 | `lomora-linux-x86_64` |
+            | Linux x86_64 (glibc 2.34+) | `lomora-linux-x86_64` |
             | macOS (Apple Silicon) | `lomora-macos-aarch64` |
             | Checksums | `SHA256SUMS` |
+
+            None of these is an installer, package, shell script, or disk image — each asset is a single self-contained executable. The Linux file is a dynamically linked glibc ELF executable (musl systems such as Alpine need a source build). The macOS file is a bare, unsigned Mach-O executable for Apple Silicon only — no `.app` bundle or DMG, and an Intel Mac needs its own build. The Windows file is an unsigned console executable.
 
             Install from a terminal:
 
@@ -128,6 +130,8 @@ jobs:
             ```
 
             - Run the binary from a folder of its own: the database is created at `data/lomora.db` beside the working directory. `PORT` and `LOMORA_DB` override the defaults.
+            - On Windows, starting `lomora` from a shell hands off to the tray and returns your prompt, so closing the terminal does not stop the server. `lomora --console` keeps it in the foreground and streams the log.
+            - The Linux binary needs glibc 2.34 or newer: Ubuntu 22.04+, Debian 12+, RHEL/Rocky/Alma 9+. Ubuntu 20.04 and Debian 11 are too old. A static build is not offered because static linking breaks NVML's runtime `dlopen`.
             - The binaries are unsigned. On Windows, SmartScreen shows "unknown publisher" once; choose *More info* then *Run anyway*. On macOS, right-click the binary and choose *Open* the first time, or run `chmod +x` and start it from a terminal.
             - GPU metrics need an NVIDIA driver exposing NVML (`nvml.dll` on Windows, `libnvidia-ml.so` on Linux). Machines without one, including Apple Silicon Macs, report CPU and RAM only, and the dashboard explains why and links the Windows/Linux driver download when a card is present.
 
