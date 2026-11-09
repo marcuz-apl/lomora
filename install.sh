@@ -70,12 +70,46 @@ staged="$install_dir/.lomora.new.$$"
 trap 'rm -rf "$tmp"; rm -f "$staged"' EXIT HUP INT TERM
 
 printf 'Downloading %s (%s)...\n' "$asset" "$tag"
-curl -fsSL --retry 3 --retry-delay 1 -o "$tmp/$asset" "$base/$asset" \
-    || fail "download failed: $base/$asset"
+
+# GitHub's release download endpoint answers 504 on these assets in bursts -
+# measured at five failures in ten attempts, minutes apart, for the same file,
+# on a network that had just downloaded it twice. A 504 there says nothing
+# about the release, so: retry, then fall back to the API asset endpoint, which
+# serves the same bytes through a different path.
+api_asset_id() {
+    curl -fsSL --retry 3 --retry-delay 2 \
+        "https://api.github.com/repos/$REPO/releases/tags/$tag" 2>/dev/null \
+        | awk -v want="$1" '
+            match($0, /"id":[[:space:]]*[0-9]+/) {
+                id = substr($0, RSTART, RLENGTH); sub(/.*[^0-9]/, "", id)
+            }
+            index($0, "\"name\": \"" want "\"") { print id; exit }
+        '
+}
+
+fetch() {
+    if curl -fsSL --retry 5 --retry-delay 2 --retry-max-time 240 \
+            -o "$tmp/$1" "$base/$1"; then
+        return 0
+    fi
+    # A mirror is the whole answer: never reach back to GitHub behind one.
+    if [ -n "${LOMORA_RELEASE_BASE:-}" ]; then
+        return 1
+    fi
+    printf '  the release endpoint is failing; trying the API instead\n' >&2
+    id="$(api_asset_id "$1")"
+    case "$id" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    curl -fsSL --retry 5 --retry-delay 2 --retry-max-time 240 \
+        -H 'Accept: application/octet-stream' \
+        -o "$tmp/$1" "https://api.github.com/repos/$REPO/releases/assets/$id"
+}
+
+fetch "$asset" || fail "download failed: $base/$asset - GitHub returned an error for it; retry in a minute, or set LOMORA_RELEASE_BASE to a mirror"
 # Releases older than the checksum job have no SHA256SUMS; verification then
 # degrades to HTTPS only instead of failing the install.
-curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" 2>/dev/null \
-    || rm -f "$tmp/SHA256SUMS"
+fetch SHA256SUMS || rm -f "$tmp/SHA256SUMS"
 
 if [ "${LOMORA_SKIP_VERIFY:-0}" = 1 ]; then
     printf '  checksum verification skipped (LOMORA_SKIP_VERIFY=1)\n'
@@ -95,7 +129,9 @@ else
         expected="$(awk -v a="$asset" '{ n=$2; sub(/^\*/, "", n); if (n == a) { print $1; exit } }' \
             "$tmp/SHA256SUMS")"
         [ -n "$expected" ] || fail "$asset is not listed in SHA256SUMS"
-        actual="$($hasher "$tmp/$asset" | awk '{print $1}')"
+        # coreutils prefixes the line with a backslash when it had to escape the
+        # filename, so the hash is then the second field of `\hash *name`.
+        actual="$($hasher "$tmp/$asset" | awk '{ sub(/^\\/, "", $1); print $1 }')"
         [ "$actual" = "$expected" ] \
             || fail "checksum mismatch for $asset (expected $expected, got $actual)"
         printf '  checksum OK\n'

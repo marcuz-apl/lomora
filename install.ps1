@@ -44,15 +44,46 @@ $Base = if ($env:LOMORA_RELEASE_BASE) {
 $Tmp = Join-Path ([IO.Path]::GetTempPath()) ('lomora-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $Tmp | Out-Null
 
+# GitHub's release download endpoint answers 504 on these assets in bursts -
+# measured at five failures in ten attempts, minutes apart, for the same file.
+# A 504 there says nothing about the release, so retry, then fall back to the
+# API asset endpoint, which serves the same bytes through a different path.
+function Save-Asset([string]$Name, [string]$Path) {
+    for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
+        try {
+            Invoke-WebRequest -Uri "$Base/$Name" -OutFile $Path -UseBasicParsing
+            return
+        } catch {
+            $Status = 0
+            if ($_.Exception.Response) { $Status = [int]$_.Exception.Response.StatusCode }
+            # A 404 is an answer, not a hiccup: the asset really is missing.
+            if ($Status -eq 404) { throw }
+            if ($Attempt -eq 5) { break }
+            Write-Host "  attempt $Attempt failed (HTTP $Status); retrying..."
+            Start-Sleep -Seconds 2
+        }
+    }
+    if ($env:LOMORA_RELEASE_BASE) {
+        throw "Download failed: $Base/$Name"
+    }
+    Write-Host '  the release endpoint is failing; trying the API instead'
+    $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/tags/$Tag" `
+        -Headers @{ 'User-Agent' = 'lomora-installer' }
+    $Entry = $Release.assets | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+    if (-not $Entry) { throw "$Name is not attached to release $Tag" }
+    Invoke-WebRequest -Uri $Entry.url -OutFile $Path -UseBasicParsing `
+        -Headers @{ 'Accept' = 'application/octet-stream'; 'User-Agent' = 'lomora-installer' }
+}
+
 try {
     $Downloaded = Join-Path $Tmp $Asset
     Write-Host "Downloading $Asset ($Tag)..."
-    Invoke-WebRequest -Uri "$Base/$Asset" -OutFile $Downloaded -UseBasicParsing
+    Save-Asset $Asset $Downloaded
 
     # Older releases have no SHA256SUMS; verification then degrades to HTTPS only.
     $Sums = Join-Path $Tmp 'SHA256SUMS'
     try {
-        Invoke-WebRequest -Uri "$Base/SHA256SUMS" -OutFile $Sums -UseBasicParsing -ErrorAction Stop
+        Save-Asset 'SHA256SUMS' $Sums
     } catch {
         $Sums = $null
     }

@@ -79,16 +79,17 @@ function targetPath() {
   return writable(binDir) ? beside : cached;
 }
 
-function request(url, redirectsLeft = 6) {
+function request(url, headers = {}, redirectsLeft = 6) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith('http:') ? http : https;
-    const req = lib.get(url, { headers: { 'User-Agent': 'lomora-npm-installer' } }, (res) => {
+    const options = { headers: { 'User-Agent': 'lomora-npm-installer', ...headers } };
+    const req = lib.get(url, options, (res) => {
       const status = res.statusCode || 0;
       if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
         res.resume();
         if (redirectsLeft === 0) return reject(new Error('too many redirects'));
         const next = new URL(res.headers.location, url).toString();
-        return resolve(request(next, redirectsLeft - 1));
+        return resolve(request(next, headers, redirectsLeft - 1));
       }
       if (status !== 200) {
         res.resume();
@@ -101,8 +102,9 @@ function request(url, redirectsLeft = 6) {
   });
 }
 
-async function downloadToFile(url, dest) {
-  const res = await request(url);
+async function downloadToFile(url, dest, headers) {
+  fs.rmSync(dest, { force: true });
+  const res = await request(url, headers);
   await new Promise((resolve, reject) => {
     const out = fs.createWriteStream(dest);
     res.on('error', reject);
@@ -112,11 +114,68 @@ async function downloadToFile(url, dest) {
   });
 }
 
-async function downloadText(url) {
-  const res = await request(url);
+async function downloadText(url, headers) {
+  const res = await request(url, headers);
   let body = '';
   for await (const chunk of res) body += chunk.toString('utf8');
   return body;
+}
+
+// GitHub's release download endpoint answers 504 on these assets in bursts -
+// measured at five failures in ten attempts, minutes apart, for the same file,
+// on a network that had just downloaded it twice. A 504 there says nothing
+// about the release, so retry transient failures, then fall back to the API
+// asset endpoint, which serves the same bytes through a different path.
+function transient(err) {
+  const status = /^HTTP (\d{3})/.exec(err.message || '');
+  if (!status) return true; // socket errors and timeouts are worth another try
+  const code = Number(status[1]);
+  return code >= 500 || code === 429;
+}
+
+async function withRetries(attempt, attempts = 5) {
+  for (let i = 1; ; i += 1) {
+    try {
+      return await attempt();
+    } catch (err) {
+      if (!transient(err) || i === attempts) throw err;
+      console.warn(`lomora: ${String(err.message).split(' for ')[0]}; retrying (${i}/${attempts})`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+}
+
+async function apiAssetUrl(asset) {
+  const body = await withRetries(() =>
+    downloadText(`https://api.github.com/repos/${REPO}/releases/tags/${tag}`));
+  const release = JSON.parse(body);
+  if (!Array.isArray(release.assets)) {
+    // A rate-limited or failed API call still returns JSON, just not a release.
+    throw new Error(release.message || 'unexpected response from the release API');
+  }
+  const entry = release.assets.find((a) => a.name === asset);
+  if (!entry) throw new Error(`${asset} is not attached to release ${tag}`);
+  return entry.url;
+}
+
+let usingApi = false;
+
+// fetchWith takes (url, headers) - downloadToFile or downloadText.
+async function fetchAsset(asset, fetchWith) {
+  if (!usingApi) {
+    try {
+      return await withRetries(() => fetchWith(`${base}/${asset}`, {}));
+    } catch (err) {
+      // A mirror is the whole answer: never reach back to GitHub behind one.
+      if (process.env.LOMORA_RELEASE_BASE) throw err;
+      // One asset has now failed five times, so the rest of this install goes
+      // straight to the API rather than paying the same wait again.
+      usingApi = true;
+      console.warn('lomora: the release endpoint is failing; trying the API instead');
+    }
+  }
+  const url = await apiAssetUrl(asset);
+  return withRetries(() => fetchWith(url, { Accept: 'application/octet-stream' }));
 }
 
 function expectedHash(sums, asset) {
@@ -172,14 +231,14 @@ async function ensureBinary() {
   const tmp = path.join(destDir, `.${asset}.${process.pid}.download`);
   try {
     console.log(`lomora: downloading ${asset} (${tag})...`);
-    await downloadToFile(`${base}/${asset}`, tmp);
+    await fetchAsset(asset, (url, headers) => downloadToFile(url, tmp, headers));
 
     if (process.env.LOMORA_SKIP_VERIFY === '1') {
       console.log('lomora: checksum verification skipped (LOMORA_SKIP_VERIFY=1)');
     } else {
       let sums;
       try {
-        sums = await downloadText(`${base}/SHA256SUMS`);
+        sums = await fetchAsset('SHA256SUMS', downloadText);
       } catch {
         // Releases published before the checksum job have no SHA256SUMS.
         console.warn('lomora: no SHA256SUMS in this release; verified by HTTPS only');
