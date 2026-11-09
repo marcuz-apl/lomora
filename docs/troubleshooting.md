@@ -197,6 +197,36 @@ lsof -iTCP:8501 -sTCP:LISTEN
 Set `PORT=9000` (or any free port) to move it. A crash can leave a stale `data/lomora.pid`; it is
 only a convenience for `kill`, so remove it if the process is gone.
 
+### WSL: `lomora` started but no browser appeared
+
+That is the design, not a crash. The tray icon, its balloon and the "Open dashboard" menu are
+Windows-only; on Linux `lomora` starts an HTTP server in the foreground, prints
+`Lomora listening on http://0.0.0.0:8501`, and holds that terminal. Open the address yourself.
+Closing the WSL window or pressing Ctrl+C stops the server — use `lomora --hidden` for a detached
+one, which writes `data/lomora.pid`.
+
+Split the problem in two from inside WSL, with the server still running in another terminal:
+
+```bash
+curl -sS http://127.0.0.1:8501/api/version
+```
+
+A JSON reply means the server is healthy and only the Windows -> WSL2 hop is failing. Open
+`http://127.0.0.1:8501` rather than `localhost` (Windows often resolves `localhost` to `::1`
+first, while the server binds IPv4 only), or use the WSL address from `hostname -I`. If the relay
+has gone stale, run `wsl --shutdown` in PowerShell and reopen WSL. `.wslconfig` needs
+`localhostForwarding=true` under `[wsl2]`; it is the default when unset.
+
+`Connection refused` means nothing is listening, so read the terminal you launched it in:
+
+- `GLIBC_2.34 not found` — the release binary needs glibc 2.34+ (`ldd --version`), i.e. Ubuntu
+  22.04+ or Debian 12+. An older WSL distro cannot run it; build from source there.
+- A SQLite error — `data/lomora.db` is created beside the working directory. Run from a native
+  Linux directory such as `~/lomora`, not `/mnt/c/...`, where DrvFS locking is unreliable.
+- `Address already in use` — set `PORT=9000`.
+- `command -v lomora` — WSL appends the Windows PATH, so make sure it resolves to the Linux
+  binary and not a Windows `lomora.exe`.
+
 ### GPU counters are missing
 
 They need an NVIDIA driver exposing NVML (`nvml.dll` on Windows, `libnvidia-ml.so` on Linux). Without
