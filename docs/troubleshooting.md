@@ -211,13 +211,38 @@ Split the problem in two from inside WSL, with the server still running in anoth
 curl -sS http://127.0.0.1:8501/api/version
 ```
 
-A JSON reply means the server is healthy and only the Windows -> WSL2 hop is failing. Open
+A JSON reply means the server is healthy and only the Windows -> WSL2 hop is failing. First try
 `http://127.0.0.1:8501` rather than `localhost` (Windows often resolves `localhost` to `::1`
-first, while the server binds IPv4 only), or use the WSL address from `hostname -I`. If the relay
-has gone stale, run `wsl --shutdown` in PowerShell and reopen WSL. `.wslconfig` needs
-`localhostForwarding=true` under `[wsl2]`; it is the default when unset.
+first, while the server binds IPv4 only). If that also fails, the relay is down — see below.
 
-`Connection refused` means nothing is listening, so read the terminal you launched it in:
+If **both** `localhost:8501` and `127.0.0.1:8501` fail from the Windows browser while the WSL-side
+curl succeeds, the WSL2 loopback relay is not listening at all — the `::1` advice above is not the
+cause in that case. Check it from PowerShell on the Windows host (a proxy-free request; an HTTP
+proxy in the environment can otherwise answer with a misleading 502):
+
+```powershell
+curl.exe --noproxy '*' -sS http://127.0.0.1:8501/api/version
+netstat -an | findstr :8501
+```
+
+`Connection refused` plus no listener means the relay is down. The dashboard is still reachable on
+the WSL VM's own address, because Lomora binds `0.0.0.0`:
+
+```bash
+hostname -I | awk '{print $1}'     # inside WSL, e.g. 172.23.110.108
+```
+
+Open `http://<that-ip>:8501` in the Windows browser. That address changes when WSL restarts, so
+read it again after a reboot. To restore loopback instead, run `wsl --shutdown` in PowerShell and
+reopen WSL; that also stops a detached `--hidden` server, so start it again afterwards. Adding an
+explicit `localhostForwarding=true` to `.wslconfig` first makes the intent clear:
+
+```ini
+[wsl2]
+localhostForwarding=true
+```
+
+If the WSL-side curl above is refused, nothing is listening; read the terminal you launched it in:
 
 - `GLIBC_2.34 not found` — the release binary needs glibc 2.34+ (`ldd --version`), i.e. Ubuntu
   22.04+ or Debian 12+. An older WSL distro cannot run it; build from source there.
