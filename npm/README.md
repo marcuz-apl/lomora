@@ -67,5 +67,6 @@ node "$(npm root -g)/lomora/scripts/install.js"
 - The binaries are unsigned (Windows `Get-AuthenticodeSignature` reports `NotSigned`). The first-run download has no Mark-of-the-Web and the binary is launched from a terminal, so the SmartScreen "Windows protected your PC" prompt normally does not appear; a copy downloaded in a browser does carry MOTW and will warn once (*More info → Run anyway*). Corporate WDAC/AppLocker policies can still require a signature.
 - On macOS, browser downloads get `com.apple.quarantine` and may need right-click → *Open* the first time; curl and npm downloads are normally not quarantined.
 - GPU metrics require an NVIDIA driver exposing NVML. Without one, CPU and RAM metrics still work.
+- If `npm install` warns that install scripts are blocked, that is expected: this package has no lifecycle script. A stale 0.1.8 install that says "the lomora binary is missing", a download that fails on repeated `504`s, or a `lomora` that the shell cannot find are all covered in [troubleshooting](https://github.com/marcuz-apl/lomora/blob/master/docs/troubleshooting.md).
 - See the [project README](https://github.com/marcuz-apl/lomora#readme) for the HTTP API, configuration and the full feature list.
 - MIT licensed.

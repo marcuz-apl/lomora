@@ -56,6 +56,8 @@ The executable itself is still unsigned (`Get-AuthenticodeSignature` reports `No
 
 Code signing is deliberately out of scope for now. Lomora is a small, newly released tool, and its trust model is the GitHub Releases page over HTTPS plus `SHA256SUMS`, which both installers check. That gives download integrity and keeps the terminal install path free of prompts, at the cost of the browser-download warning and managed-device policies noted above. Signing can be added to the release workflow later without changing any of the installers.
 
+If an install step fails, [docs/troubleshooting.md](./docs/troubleshooting.md) works from the message you actually see: `504` bursts from the release endpoint, npm's `allowScripts` block, the 0.1.8 "binary is missing" launcher, a stale `lomora` in the shell's command cache, and the glibc floor on older Linux distributions.
+
 ## Build from source
 
 Requirements: Rust stable (tested with 1.97), and optionally an NVIDIA driver exposing NVML for GPU metrics (a local LM Studio on the default endpoint http://localhost:1234 is optional too).
